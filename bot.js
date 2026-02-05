@@ -8,10 +8,10 @@ const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const AUTHORIZED_USER_ID = process.env.AUTHORIZED_USER_ID;
 
-// Caricamento Contesto (Cerebro Personality)
-let systemContext = "Sei Cerebro, un assistente digitale evoluto. Rispondi in italiano.\n";
+// Caricamento Contesto (Codex20 Personality)
+let systemContext = "Sei Codex20, un assistente digitale evoluto. Rispondi in italiano.\n";
 try {
-  const contextDir = path.join(__dirname, 'context');
+  const contextDir = path.join(__dirname, 'data');
   ['SOUL.md', 'IDENTITY.md', 'USER.md'].forEach(file => {
     const filePath = path.join(contextDir, file);
     if (fs.existsSync(filePath)) {
@@ -36,7 +36,8 @@ bot.on('text', async (ctx) => {
             max_tokens: 2048,
         });
 
-        const response = chatCompletion.choices[0]?.message?.content || "Cerebro non ha prodotto risposta.";
+        let response = chatCompletion.choices[0]?.message?.content || "Codex20 non ha prodotto risposta.";
+        response += "\n\n🎲";
         
         if (response.length > 4000) {
             await ctx.reply(response.substring(0, 4000));
@@ -45,9 +46,9 @@ bot.on('text', async (ctx) => {
         }
     } catch (error) {
         console.error("Errore Groq:", error);
-        ctx.reply("Spiacente, Cerebro ha avuto un glitch di comunicazione con i server Groq.");
+        ctx.reply("Spiacente, Codex20 ha avuto un glitch di comunicazione con i server Groq. 🎲");
     }
 });
 
 bot.launch();
-console.log('Cerebro Bot (Groq Speed) attivo!');
+console.log('Codex20 Bot attivo!');
