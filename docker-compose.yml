@@ -1,0 +1,11 @@
+services:
+  gemini-bot:
+    build: .
+    container_name: gemini-telegram-bot
+    restart: always
+    env_file: /DATA/AppData/gemini-telegram-bot/config/.env
+    volumes:
+      - /root/.gemini:/root/.gemini
+      - /DATA/AppData/gemini-telegram-bot:/app/data
+    environment:
+      - HOME=/root
