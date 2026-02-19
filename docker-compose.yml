@@ -1,0 +1,11 @@
+services:
+  codex20-bot:
+    build: .
+    container_name: codex20-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/app/downloads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
