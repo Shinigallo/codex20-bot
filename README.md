@@ -6,13 +6,17 @@ Codex20 è un assistente digitale evoluto per Dungeon Master e giocatori di D&D 
 
 - **Mente Gemini 2.0 Flash:** Integra i modelli più avanzati di Google per risposte rapide, creative e contestualizzate.
 - **Custode dei Tomi (5etools):** Consulta automaticamente un database espanso di file JSON (razze, classi, mostri, incantesimi) per fornire risposte basate sulle regole ufficiali.
-- **Forgia degli Eroi:** Generazione istantanea di schede personaggio in formato **PDF** tramite il comando `/randompg`.
+- **Forgia degli Eroi Avanzata:** Generazione istantanea di schede personaggio in formato **PDF** sia casuali che specifiche tramite linguaggio naturale.
 - **Resilienza API:** Logica di rotazione automatica multi-chiave per gestire i limiti di quota delle API Gemini.
 
-## 🛠️ Comandi Disponibili
+## 🛠️ Comandi e Funzionalità
 
-- `/randompg` - Consulta i Tomi e forgia un nuovo eroe casuale di livello 1, inviando una scheda PDF completa.
-- `[Messaggio di testo]` - Chiedi a Codex20 qualsiasi cosa riguardo regole, lore o aiuto per la tua campagna.
+- `/randompg` - Consulta i Tomi e forgia un nuovo eroe casuale di livello 1.
+- **Creazione Intelligente:** Chiedi a Codex20 in linguaggio naturale, ad esempio: 
+  - *"Creati un mago umano di livello 5"*
+  - *"Fammi la scheda di un ladro tiefling livello 3"*
+  Codex20 genererà automaticamente il PDF completo con statistiche, competenze ed equipaggiamento.
+- **Consultazione Regole:** Chiedi dettagli su mostri, incantesimi o regole specifiche (es. *"Cosa fa l'incantesimo Palla di Fuoco?"*), il bot cercherà nei manuali (5etools) per darti la risposta corretta.
 
 ## 🚀 Installazione (Docker)
 
@@ -28,7 +32,7 @@ Codex20 è un assistente digitale evoluto per Dungeon Master e giocatori di D&D 
    ```
 
 ## 📂 Struttura Dati
-Il bot si aspetta di trovare i dati di 5etools nella cartella `data/5etools/`. Supporta la scansione ricorsiva di tutti i file JSON per trovare informazioni su razze, classi e background.
+Il bot si aspetta di trovare i dati di 5etools nella cartella `data/5etools/`. Supporta la scansione ricorsiva di tutti i file JSON per trovare informazioni su razze, classi e background. Il bot utilizza questi dati per fare **grounding** delle risposte fornite dall'AI.
 
 ---
 *Codex20 è in continua evoluzione. Che il tuo d20 possa sempre segnare 20!* 🎲
