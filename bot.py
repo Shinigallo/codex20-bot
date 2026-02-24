@@ -43,18 +43,40 @@ async def generate_content_safe(prompt):
             raise e
     return None
 
+# --- LOGICA RICERCA TOMI (5ETOOLS) ---
+def search_5etools(query):
+    data_dir = os.path.join("data", "5etools")
+    if not os.path.exists(data_dir): return ""
+    found_data = ""
+    keywords = [k.lower() for k in query.split() if len(k) > 3]
+    if not keywords: return ""
+    
+    for file_path in glob.glob(os.path.join(data_dir, "**", "*.json"), recursive=True):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = json.load(f)
+                for key, collection in content.items():
+                    if isinstance(collection, list) and key not in ["_meta", "linkedFile"]:
+                        for item in collection:
+                            if isinstance(item, dict) and "name" in item:
+                                if any(k in item["name"].lower() for k in keywords):
+                                    found_data += f"\n[{key.upper()} - {os.path.basename(file_path)}]:\n{json.dumps(item, indent=2)}\n"
+                                    if len(found_data) > 6000: break # Limite per non intasare il prompt
+                        if len(found_data) > 6000: break
+        except: continue
+        if len(found_data) > 6000: break
+    return f"\n\nDATI TECNICI DAI TOMI (5ETOOLS):\n{found_data}" if found_data else ""
+
 def get_personality_context():
     context = """Sei Codex20, un assistente digitale evoluto e Dungeon Master esperto. Rispondi in italiano.\n
-    IMPORTANTE: Se l'utente ti chiede esplicitamente di creare un personaggio o una scheda (es. 'creami un mago livello 5'), 
-    genera i dati tecnici completi e rispondi fornendo un blocco JSON racchiuso tra ```json e ``` contenente:
-    nome, razza, classe, livello, background, forza, destrezza, costituzione, intelligenza, saggezza, carisma, competenze, equipaggiamento, descrizione_breve.
-    Usa i dati di D&D 5e e sii preciso con i calcoli del livello richiesto."""
+    IMPORTANTE: Se l'utente ti chiede di creare un personaggio o una scheda, genera i dati tecnici completi e rispondi fornendo un blocco JSON racchiuso tra ```json e ``` contenente tutte le chiavi necessarie (nome, razza, classe, livello, background, forza, destrezza, costituzione, intelligenza, saggezza, carisma, competenze, equipaggiamento, descrizione_breve).
+    Usa i dati forniti dai Tomi per essere accurato con le regole di D&D 5e."""
     data_dir = "data"
     for file_name in ["SOUL.md", "IDENTITY.md", "USER.md"]:
         path = os.path.join(data_dir, file_name)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                context += f"\nINFORMAZIONI DA {file_name}:\n{f.read()}\n"
+                context += f"\nINFORMAZIONI DI PERSONALITÀ:\n{f.read()}\n"
     return context
 
 system_context_base = get_personality_context()
@@ -102,8 +124,9 @@ def create_pdf(char, user_id):
 async def chat_handler(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Prompt per Gemini con supporto creazione PG
-    prompt = f"{system_context_base}\n\nUtente: {message.text}"
+    # Ricerca nei Tomi basata sul messaggio dell'utente
+    tomi_context = search_5etools(message.text)
+    prompt = f"{system_context_base}{tomi_context}\n\nUtente: {message.text}"
     
     try:
         response_text = await generate_content_safe(prompt)
@@ -116,23 +139,20 @@ async def chat_handler(message: types.Message):
             try:
                 char_data = json.loads(json_match.group(1))
                 pdf_path = create_pdf(char_data, message.from_user.id)
-                
-                # Rimuoviamo il JSON dal testo della risposta per pulizia
                 clean_text = re.sub(r"```json.*?```", "", response_text, flags=re.DOTALL).strip()
-                if clean_text:
-                    await message.answer(clean_text)
+                if clean_text: await message.answer(clean_text)
                 
                 await message.answer_document(
                     FSInputFile(pdf_path), 
-                    caption=f"Ecco la scheda di *{char_data.get('nome')}*, {char_data.get('classe')} di livello {char_data.get('livello', 1)}! 🎲",
+                    caption=f"Ecco la scheda di *{char_data.get('nome')}*! 🎲",
                     parse_mode="Markdown"
                 )
                 if os.path.exists(pdf_path): os.remove(pdf_path)
                 return
             except Exception as e:
-                logger.error(f"Errore parsing JSON o PDF: {e}")
+                logger.error(f"Errore JSON/PDF: {e}")
 
-        # Risposta standard se non è una creazione PG
+        # Risposta standard con Markdown
         if len(response_text) > 4000:
             await message.answer(f"{response_text[:4000]}...")
         else:
