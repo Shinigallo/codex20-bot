@@ -7,5 +7,6 @@ services:
       - .env
     volumes:
       - ./downloads:/app/downloads
+      - /home/dario/5etools-docker/htdocs/data:/app/data:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
