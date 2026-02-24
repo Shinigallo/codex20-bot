@@ -4,6 +4,7 @@
   "main": "bot.js",
   "dependencies": {
     "@google/gemini-cli": "latest",
+    "@google/generative-ai": "^0.24.1",
     "dotenv": "^16.4.5",
     "groq-sdk": "^0.37.0",
     "playwright": "^1.58.1",

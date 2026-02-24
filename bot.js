@@ -1,5 +1,5 @@
 const { Telegraf } = require('telegraf');
-const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -8,20 +8,26 @@ require('dotenv').config();
 require('./healthcheck.js');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
 const AUTHORIZED_USER_ID = process.env.AUTHORIZED_USER_ID;
 
 // Caricamento Contesto Base (Codex20 Personality)
 let systemContextBase = "Sei Codex20, un assistente digitale evoluto e Dungeon Master esperto. Rispondi in italiano.\n";
 try {
   const contextDir = path.join(__dirname, 'data');
-  ['SOUL.md', 'IDENTITY.md', 'USER.md'].forEach(file => {
+  const filesToRead = ['SOUL.md', 'IDENTITY.md', 'USER.md'];
+  filesToRead.forEach(file => {
     const filePath = path.join(contextDir, file);
     if (fs.existsSync(filePath)) {
-        systemContextBase += `\nINFORMAZIONI DA ${file}:\n${fs.readFileSync(filePath, 'utf8')}\n`;
+        const content = fs.readFileSync(filePath, 'utf8');
+        systemContextBase += `\nINFORMAZIONI DA ${file}:\n${content}\n`;
     }
   });
-} catch (e) { console.error("Errore contesto:", e); }
+} catch (e) { 
+  console.error("Errore caricamento contesto:", e); 
+}
 
 // Funzione ricorsiva per cercare file JSON
 function getAllFiles(dirPath, arrayOfFiles) {
@@ -47,35 +53,37 @@ function search5etools(query) {
     if (!fs.existsSync(dataDir)) return "";
 
     let foundData = "";
-    const allFiles = getAllFiles(dataDir);
-    const keywords = query.toLowerCase().split(' ').filter(k => k.length > 3);
+    try {
+        const allFiles = getAllFiles(dataDir);
+        const keywords = query.toLowerCase().split(' ').filter(k => k.length > 3);
 
-    if (keywords.length === 0) return "";
+        if (keywords.length === 0) return "";
 
-    for (const filePath of allFiles) {
-        try {
-            const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-            
-            // Cerca in tutte le possibili chiavi di 5etools
-            const keys = Object.keys(content).filter(k => !['_meta', 'linkedFile'].includes(k));
-            
-            for (const key of keys) {
-                const collection = content[key];
-                if (Array.isArray(collection)) {
-                    for (const item of collection) {
-                        if (item.name && keywords.some(k => item.name.toLowerCase().includes(k))) {
-                            foundData += `\n[${key.toUpperCase()} - ${path.basename(filePath)}]:\n${JSON.stringify(item, null, 2)}\n`;
-                            if (foundData.length > 8000) break; // Limite sicurezza
+        for (const filePath of allFiles) {
+            try {
+                const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const keys = Object.keys(content).filter(k => !['_meta', 'linkedFile'].includes(k));
+                
+                for (const key of keys) {
+                    const collection = content[key];
+                    if (Array.isArray(collection)) {
+                        for (const item of collection) {
+                            if (item.name && keywords.some(k => item.name.toLowerCase().includes(k))) {
+                                foundData += `\n[${key.toUpperCase()} - ${path.basename(filePath)}]:\n${JSON.stringify(item, null, 2)}\n`;
+                                if (foundData.length > 8000) break;
+                            }
                         }
                     }
+                    if (foundData.length > 8000) break;
                 }
-                if (foundData.length > 8000) break;
-            }
-        } catch (e) { /* ignore parse errors for non-5etools files */ }
-        if (foundData.length > 8000) break;
+            } catch (e) { }
+            if (foundData.length > 8000) break;
+        }
+    } catch (e) { 
+        console.error("Errore ricerca 5etools:", e);
     }
 
-    return foundData ? `\n\nDATI TECNICI DA 5ETOOLS (usa questi per rispondere con precisione):\n${foundData}` : "";
+    return foundData ? `\n\nDATI TECNICI DA 5ETOOLS:\n${foundData}` : "";
 }
 
 bot.on('text', async (ctx) => {
@@ -85,20 +93,13 @@ bot.on('text', async (ctx) => {
 
     const userQuery = ctx.message.text;
     const additionalContext = search5etools(userQuery);
-    const finalSystemContext = systemContextBase + additionalContext;
+    const finalPrompt = `${systemContextBase}${additionalContext}\n\nUtente: ${userQuery}`;
 
     try {
-        const chatCompletion = await groq.chat.completions.create({
-            messages: [
-                { role: 'system', content: finalSystemContext },
-                { role: 'user', content: userQuery }
-            ],
-            model: 'llama-3.3-70b-versatile',
-            temperature: 0.7,
-            max_tokens: 2048,
-        });
+        const result = await model.generateContent(finalPrompt);
+        const responseText = result.response.text();
 
-        let response = chatCompletion.choices[0]?.message?.content || "Codex20 non ha prodotto risposta.";
+        let response = responseText || "Codex20 non ha prodotto risposta.";
         response += "\n\n🎲";
         
         if (response.length > 4000) {
@@ -107,10 +108,10 @@ bot.on('text', async (ctx) => {
             await ctx.reply(response, { parse_mode: 'Markdown' }).catch(() => ctx.reply(response));
         }
     } catch (error) {
-        console.error("Errore Groq:", error);
-        ctx.reply("Spiacente, Codex20 ha avuto un glitch di comunicazione con i server Groq. 🎲");
+        console.error("Errore Gemini:", error);
+        ctx.reply("Spiacente, Codex20 ha avuto un glitch di comunicazione con i server Gemini. 🎲");
     }
 });
 
 bot.launch();
-console.log('Codex20 Bot attivo con database 5etools espanso!');
+console.log('Codex20 Bot attivo con Gemini (2.0 Flash)!');
