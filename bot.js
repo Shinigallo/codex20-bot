@@ -9,7 +9,7 @@ require('./healthcheck.js');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
 const AUTHORIZED_USER_ID = process.env.AUTHORIZED_USER_ID;
 
@@ -114,4 +114,4 @@ bot.on('text', async (ctx) => {
 });
 
 bot.launch();
-console.log('Codex20 Bot attivo con Gemini (2.0 Flash)!');
+console.log('Codex20 Bot attivo con Gemini (1.5 Flash Latest)!');
