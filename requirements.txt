@@ -1,0 +1,7 @@
+aiogram>=3.0.0
+google-generativeai
+python-dotenv
+aiohttp
+fpdf2
+aiofiles
+pypdf

@@ -1,17 +1,10 @@
-FROM node:20
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Installiamo le dipendenze per Playwright (se serviranno per get_token.js)
-RUN npx playwright install-deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY package*.json ./
-RUN npm install
-
-# Copiamo tutto il codice, inclusi i dati 5etools scaricati
 COPY . .
 
-# Esponiamo la porta per Koyeb
-EXPOSE 8080
-
-CMD ["node", "bot.js"]
+CMD ["python", "bot.py"]

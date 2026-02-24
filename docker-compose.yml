@@ -1,10 +1,10 @@
 services:
-  gemini-bot:
+  python-bot:
     build: .
-    container_name: codex20-bot
+    container_name: codex20-python
     restart: always
     env_file: .env
     volumes:
       - ./data:/app/data
     environment:
-      - HOME=/root
+      - PYTHONUNBUFFERED=1
