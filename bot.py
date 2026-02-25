@@ -319,7 +319,8 @@ async def chat_handler(message: types.Message):
                 logger.error(f"Errore JSON/PDF: {e}")
 
         # Risposta standard con Markdown
-        response_text = response_text.strip()\n        if len(response_text) > 4000:
+                response_text = response_text.strip()
+        if len(response_text) > 4000:
             await message.answer(f"{response_text[:4000]}...")
         else:
             await message.answer(f"{response_text}\n\n🎲", parse_mode="Markdown")
