@@ -365,40 +365,64 @@ async def chat_handler(message: types.Message):
         if not response_text: return
 
         # Cerchiamo se l'AI ha generato il payload JSON per la scheda personaggio
-        json_match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
+        # Supporta ```json {JSON} ```, ``` {JSON} ``` e {JSON} (senza backticks)
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```|(\{.*?\})", response_text, re.DOTALL)
         
         if json_match:
             try:
-                char_data = json.loads(json_match.group(1))
+                # Seleziona il gruppo corretto in base a quale parte della regex ha matchato
+                json_str = json_match.group(1) if json_match.group(1) else json_match.group(2)
+                char_data = json.loads(json_str)
+                
                 # Crea fisicamente il PDF sul disco temporaneo
                 pdf_path = create_pdf(char_data, message.from_user.id)
                 
                 # Rimuove il blocco JSON dalla stringa in modo che l'utente non veda il codice RAW
-                clean_text = re.sub(r"```json.*?```", "", response_text, flags=re.DOTALL).strip()
+                clean_text = re.sub(r"```(?:json)?.*?```", "", response_text, flags=re.DOTALL).strip()
+                # Se non c'erano backticks, prova a rimuovere il JSON nudo (se è alla fine o all'inizio)
+                if clean_text == response_text.strip():
+                     clean_text = response_text.replace(json_str, "").strip()
+
                 if clean_text: 
-                    await message.answer(clean_text)
+                    try:
+                        await message.answer(clean_text, parse_mode="Markdown")
+                    except Exception:
+                        await message.answer(clean_text)
                 
-                # Invia il Documento generato
-                await message.answer_document(
-                    FSInputFile(pdf_path), 
-                    caption=f"Ecco la scheda di *{char_data.get('nome')}*! 🎲",
-                    parse_mode="Markdown"
-                )
-                
-                # Cleanup del file temporaneo
-                if os.path.exists(pdf_path): 
-                    os.remove(pdf_path)
+                if pdf_path:
+                    # Invia il Documento generato
+                    try:
+                        await message.answer_document(
+                            FSInputFile(pdf_path), 
+                            caption=f"Ecco la scheda di *{char_data.get('nome')}*! 🎲",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        await message.answer_document(
+                            FSInputFile(pdf_path), 
+                            caption=f"Ecco la scheda di {char_data.get('nome')}! 🎲"
+                        )
+                    
+                    # Cleanup del file temporaneo
+                    if os.path.exists(pdf_path): 
+                        os.remove(pdf_path)
+                else:
+                    await message.answer("Dati generati correttamente, ma c'è stato un problema nella creazione fisica del PDF. 🎲")
                 return
             
             except Exception as e:
-                logger.error(f"Errore generazione JSON o PDF: {e}")
+                logger.error(f"Errore parsing JSON o generazione PDF: {e}")
+                # Se il parsing fallisce, proseguiamo trattando come risposta testuale
 
         # Se non c'era JSON o se c'è stato un errore nel parsing, tratta come risposta standard
         response_text = response_text.strip()
         if len(response_text) > 4000:
             await message.answer(f"{response_text[:4000]}...")
         else:
-            await message.answer(f"{response_text}\n\n🎲", parse_mode="Markdown")
+            try:
+                await message.answer(f"{response_text}\n\n🎲", parse_mode="Markdown")
+            except Exception:
+                await message.answer(f"{response_text}\n\n🎲")
             
     except Exception as e:
         logger.error(f"Errore generale: {e}")
