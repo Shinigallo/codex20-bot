@@ -1,3 +1,10 @@
+"""
+Codex20 - Il Custode dei Tomi 🎲
+Bot Telegram basato su AI per Dungeon Master e Giocatori di D&D 5e.
+Integra Gemini 2.0 Flash, consultazione dinamica dei tomi (5etools) e
+generazione automatica di schede personaggio in formato PDF.
+"""
+
 import os
 import json
 import random
@@ -6,6 +13,7 @@ import asyncio
 import logging
 import re
 import io
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
@@ -15,24 +23,37 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
-# Configurazione
+# ==========================================
+# CONFIGURAZIONE INIZIALE E LOGGING
+# ==========================================
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Sistema di Resilienza: Rotazione automatica API Keys per aggirare i rate-limits (HTTP 429)
 API_KEYS = os.getenv("GEMINI_API_KEYS", "").split(",")
 current_key_index = 0
 
 def get_model():
+    """
+    Configura e restituisce l'istanza del modello Gemini corrente.
+    Utilizza la chiave API selezionata tramite rotazione.
+    """
     global current_key_index
     key = API_KEYS[current_key_index].strip()
     genai.configure(api_key=key)
     return genai.GenerativeModel("gemini-2.0-flash")
 
+# Inizializzazione Bot Telegram (Aiogram 3.x)
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 
 async def generate_content_safe(prompt):
+    """
+    Invia un prompt a Gemini in modo sicuro.
+    Gestisce automaticamente l'errore 429 (Quota Exceeded) ruotando 
+    la chiave API alla successiva disponibile e riprovando.
+    """
     global current_key_index
     for _ in range(len(API_KEYS)):
         try:
@@ -41,18 +62,30 @@ async def generate_content_safe(prompt):
             return response.text
         except Exception as e:
             if "429" in str(e) or "quota" in str(e).lower():
+                logger.warning(f"Quota superata per la chiave {current_key_index}, rotazione in corso...")
                 current_key_index = (current_key_index + 1) % len(API_KEYS)
                 continue
             raise e
     return None
 
-# --- LOGICA RICERCA TOMI (5ETOOLS) ---
+# ==========================================
+# LOGICA RAG: RICERCA NEI TOMI (5ETOOLS)
+# ==========================================
 def search_5etools(query):
+    """
+    Scansiona ricorsivamente i file JSON nella directory dei tomi (5etools).
+    Estrae dati rilevanti basati sulle keyword per fare "grounding" delle
+    risposte dell'AI, garantendo fedeltà alle regole ufficiali.
+    """
     data_dir = os.path.join("data", "5etools")
-    if not os.path.exists(data_dir): return ""
+    if not os.path.exists(data_dir): 
+        return ""
+    
     found_data = ""
+    # Estrae parole chiave significative ignorando congiunzioni brevi
     keywords = [k.lower() for k in query.split() if len(k) > 3]
-    if not keywords: return ""
+    if not keywords: 
+        return ""
     
     for file_path in glob.glob(os.path.join(data_dir, "**", "*.json"), recursive=True):
         try:
@@ -64,13 +97,22 @@ def search_5etools(query):
                             if isinstance(item, dict) and "name" in item:
                                 if any(k in item["name"].lower() for k in keywords):
                                     found_data += f"\n[{key.upper()} - {os.path.basename(file_path)}]:\n{json.dumps(item, indent=2)}\n"
-                                    if len(found_data) > 6000: break # Limite per non intasare il prompt
+                                    # Limite per non eccedere la context window del modello AI
+                                    if len(found_data) > 6000: break 
                         if len(found_data) > 6000: break
-        except: continue
+        except Exception as e: 
+            continue
         if len(found_data) > 6000: break
+            
     return f"\n\nDATI TECNICI DAI TOMI (5ETOOLS):\n{found_data}" if found_data else ""
 
 def get_personality_context():
+    """
+    Carica e assembla il System Prompt.
+    Istruisce Gemini sul suo ruolo, sul formato output (JSON) richiesto
+    per la generazione dei PDF, e carica ulteriori tratti di personalità
+    dai file SOUL.md, IDENTITY.md, USER.md se presenti.
+    """
     context = """Sei Codex20, un assistente digitale evoluto e Dungeon Master esperto. Rispondi in italiano.\n
     IMPORTANTE: Se l'utente ti chiede di creare un personaggio o una scheda, genera i dati tecnici completi e rispondi fornendo un blocco JSON racchiuso tra ```json e ``` contenente tutte le chiavi necessarie:
     (nome, razza, classe, livello, background, forza, destrezza, costituzione, intelligenza, saggezza, carisma, 
@@ -85,6 +127,7 @@ def get_personality_context():
     
     Usa i nomi standard in italiano per le abilità: acrobazia, addestrare animali, arcano, atletica, furtività, indagare, inganno, intuizione, intimidire, medicina, natura, percezione, perspicacia, persuasione, rapidità di mano, religione, sopravvivenza, storia.
     Usa i dati forniti dai Tomi per essere accurato con le regole di D&D 5e."""
+    
     data_dir = "data"
     for file_name in ["SOUL.md", "IDENTITY.md", "USER.md"]:
         path = os.path.join(data_dir, file_name)
@@ -95,17 +138,30 @@ def get_personality_context():
 
 system_context_base = get_personality_context()
 
+# ==========================================
+# FUNZIONI DI UTILITÀ D&D
+# ==========================================
 def calculate_modifier(score):
+    """Calcola il modificatore di caratteristica D&D 5e."""
     return (score - 10) // 2
 
 def get_proficiency_bonus(level):
+    """Calcola il bonus di competenza in base al livello."""
     try:
         lvl = int(level)
         return 2 + (lvl - 1) // 4
     except:
         return 2
 
+# ==========================================
+# GENERAZIONE SCHEDA PDF
+# ==========================================
 def create_pdf(char, user_id):
+    """
+    Riceve il dizionario JSON generato da Gemini e lo mappa sui
+    campi AcroForm del PDF interattivo '5E_CharacterSheet_Fillable.pdf'.
+    Genera un file temporaneo per l'utente, pronto per l'invio su Telegram.
+    """
     template_path = "5E_CharacterSheet_Fillable.pdf"
     output_path = f"data/pg_{user_id}.pdf"
     
@@ -115,7 +171,7 @@ def create_pdf(char, user_id):
 
     prof_bonus = get_proficiency_bonus(char.get('livello', 1))
     
-    # Mapping base
+    # Mapping base informazioni generali
     field_data = {
         'CharacterName': char.get('nome', ''),
         'Race ': char.get('razza', ''),
@@ -129,7 +185,7 @@ def create_pdf(char, user_id):
         'HPCurrent': str(char.get('hp_max', 10)),
     }
 
-    # Caratteristiche e Modificatori
+    # Mapping Caratteristiche, Modificatori e Tiri Salvezza
     stats_map = {
         'forza': ('STR', 'STRmod', 'ST Strength', 'Check Box 11'),
         'destrezza': ('DEX', 'DEXmod ', 'ST Dexterity', 'Check Box 18'),
@@ -147,14 +203,13 @@ def create_pdf(char, user_id):
         field_data[pdf_score] = str(val)
         field_data[pdf_mod] = f"+{mod}" if mod >= 0 else str(mod)
         
-        # Tiri Salvezza
         save_val = mod
         if stat_ita in comp_salvezza:
             save_val += prof_bonus
             field_data[pdf_check] = "Yes"
         field_data[pdf_save] = f"+{save_val}" if save_val >= 0 else str(save_val)
 
-    # Abilità (Skills)
+    # Mapping Abilità (Skills)
     skills_map = {
         'acrobazia': ('Acrobatics', 'Check Box 23', 'destrezza'),
         'addestrare animali': ('Animal', 'Check Box 24', 'saggezza'),
@@ -185,7 +240,6 @@ def create_pdf(char, user_id):
             field_data[pdf_check] = "Yes"
         field_data[pdf_field] = f"+{mod}" if mod >= 0 else str(mod)
         
-        # Percezione Passiva
         if abil_ita == 'percezione':
             field_data['Passive'] = str(10 + mod)
 
@@ -199,8 +253,7 @@ def create_pdf(char, user_id):
     field_data['SpellSaveDC  2'] = str(8 + prof_bonus + spell_mod)
     field_data['SpellAtkBonus 2'] = f"+{prof_bonus + spell_mod}"
 
-    # Nuova mappatura Spell Slots (Livelli 1-9)
-    # Seguiamo la numerazione 19-27 della scheda (SlotsTotal 19, SlotsRemaining 19, ecc.)
+    # Spell Slots (Livelli 1-9)
     slots_data = char.get('slot_incantesimi', {})
     for lvl in range(1, 10):
         s_val = str(slots_data.get(str(lvl), ''))
@@ -208,7 +261,7 @@ def create_pdf(char, user_id):
             field_data[f'SlotsTotal {18+lvl}'] = s_val
             field_data[f'SlotsRemaining {18+lvl}'] = s_val
 
-    # Nuova mappatura nomi incantesimi secondo l'ordine richiesto dall'utente
+    # Mapping Meticoloso per gli ID dei campi Spells sulla scheda PDF ufficiale
     spell_names_mapping = {
         '0': ['Spells 1014', 'Spells 1016', 'Spells 1017', 'Spells 1018', 'Spells 1019', 'Spells 1020', 'Spells 1021', 'Spells 1022'],
         '1': ['Spells 1015', 'Spells 1023', 'Spells 1024', 'Spells 1025', 'Spells 1026', 'Spells 1027', 'Spells 1028', 'Spells 1029', 'Spells 1030', 'Spells 1031', 'Spells 1032', 'Spells 1033'],
@@ -233,7 +286,9 @@ def create_pdf(char, user_id):
     field_data['Equipment'] = char.get('equipaggiamento', '')
     field_data['Backstory'] = char.get('descrizione_breve', '')
 
-    # Generazione Overlay
+    # --- Generazione Overlay Grafico ---
+    # Poiché pypdf puro non "scrive" i campi testuali per la visualizzazione normale, 
+    # creiamo un layer grafico sovrapposto (con reportlab) che riempie visivamente i form.
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=letter)
     reader = PdfReader(template_path)
@@ -252,7 +307,7 @@ def create_pdf(char, user_id):
                             width, height = x2 - x1, y2 - y1
                             
                             if "Check Box" in field_name:
-                                # Pallino per i checkbox
+                                # Inserisce un pallino al centro della checkbox
                                 can.setFont("Helvetica", 12)
                                 can.drawString(x1 + (width-8)/2, y1 + (height-8)/2, "•")
                             else:
@@ -270,7 +325,7 @@ def create_pdf(char, user_id):
         if i < len(new_pdf.pages):
             page.merge_page(new_pdf.pages[i])
         if "/Annots" in page:
-            del page["/Annots"]
+            del page["/Annots"] # Rimuove le annots originali per rendere il PDF flat
         writer.add_page(page)
     
     with open(output_path, 'wb') as f:
@@ -278,8 +333,12 @@ def create_pdf(char, user_id):
     
     return output_path
 
+# ==========================================
+# HANDLERS TELEGRAM
+# ==========================================
 @dp.message(Command("mappa"))
 async def send_map_debug(message: types.Message):
+    """Comando di utilità/debug: invia un file mappa (se esistente) per il mapping dei campi."""
     map_path = "data/MAPPA_CAMPI_SPELL.pdf"
     if os.path.exists(map_path):
         await message.answer_document(FSInputFile(map_path), caption="Ecco la mappa tecnica dei campi Spell. Dimmi quali ID corrispondono ai vari livelli!")
@@ -288,38 +347,54 @@ async def send_map_debug(message: types.Message):
 
 @dp.message(F.text)
 async def chat_handler(message: types.Message):
+    """
+    Handler principale: ascolta i messaggi, interroga i tomi e comunica con Gemini.
+    Esegue il parsing della risposta: se rileva un blocco JSON, lo invia al modulo PDF
+    e restituisce la scheda personaggio generata in chat.
+    """
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Ricerca nei Tomi basata sul messaggio dell'utente
+    # 1. Ricerca Dinamica nei manuali (5etools)
     tomi_context = search_5etools(message.text)
+    
+    # 2. Composizione del Prompt (Personalità + Regole + Richiesta Utente)
     prompt = f"{system_context_base}{tomi_context}\n\nUtente: {message.text}"
     
     try:
         response_text = await generate_content_safe(prompt)
         if not response_text: return
 
-        # Cerchiamo se Gemini ha generato un JSON per una scheda
+        # Cerchiamo se l'AI ha generato il payload JSON per la scheda personaggio
         json_match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
         
         if json_match:
             try:
                 char_data = json.loads(json_match.group(1))
+                # Crea fisicamente il PDF sul disco temporaneo
                 pdf_path = create_pdf(char_data, message.from_user.id)
-                clean_text = re.sub(r"```json.*?```", "", response_text, flags=re.DOTALL).strip()
-                if clean_text: await message.answer(clean_text)
                 
+                # Rimuove il blocco JSON dalla stringa in modo che l'utente non veda il codice RAW
+                clean_text = re.sub(r"```json.*?```", "", response_text, flags=re.DOTALL).strip()
+                if clean_text: 
+                    await message.answer(clean_text)
+                
+                # Invia il Documento generato
                 await message.answer_document(
                     FSInputFile(pdf_path), 
                     caption=f"Ecco la scheda di *{char_data.get('nome')}*! 🎲",
                     parse_mode="Markdown"
                 )
-                if os.path.exists(pdf_path): os.remove(pdf_path)
+                
+                # Cleanup del file temporaneo
+                if os.path.exists(pdf_path): 
+                    os.remove(pdf_path)
                 return
+            
             except Exception as e:
-                logger.error(f"Errore JSON/PDF: {e}")
+                logger.error(f"Errore generazione JSON o PDF: {e}")
 
-        # Risposta standard con Markdown
-                response_text = response_text.strip()
+        # Se non c'era JSON o se c'è stato un errore nel parsing, tratta come risposta standard
+        response_text = response_text.strip()
         if len(response_text) > 4000:
             await message.answer(f"{response_text[:4000]}...")
         else:
@@ -327,9 +402,13 @@ async def chat_handler(message: types.Message):
             
     except Exception as e:
         logger.error(f"Errore generale: {e}")
-        await message.answer("Spiacente, Codex20 ha avuto un glitch. 🎲")
+        await message.answer("Spiacente, Codex20 ha subito un glitch arcano. Riprova! 🎲")
 
+# ==========================================
+# BOOTSTRAP
+# ==========================================
 async def main():
+    logger.info("Avvio di Codex20 - Il Custode dei Tomi")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
