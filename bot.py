@@ -744,39 +744,124 @@ async def send_map_debug(message: types.Message):
 
 @dp.message(Command("adventure"))
 async def adventure_handler(message: types.Message):
-    """Crea avventura D&D da prompt - INTEGRATO IN CODEX20"""
+    """Crea avventura D&D completa multi-parte - VERSIONE AVANZATA"""
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     prompt = message.text.replace("/adventure", "").strip()
     if not prompt:
         await message.answer(
-            "🎲 **CODEX20 ADVENTURE CREATOR**\n\n"
-            "Genera avventure D&D complete usando i dati ufficiali!\n\n"
+            "🎲 **CODEX20 ADVENTURE CREATOR AVANZATO**\n\n"
+            "Genera avventure D&D complete e dettagliate in più parti!\n\n"
             "**Esempi:**\n"
             "`/adventure Grotta goblin per 4 PCs livello 3`\n"
             "`/adventure Torre mago per 6 giocatori livello 5`\n"
             "`/adventure Castello fantasmi livello 4`\n"
             "`/adventure Nave pirata per party esperto`\n\n"
+            "**Per avventura rapida:** `/adventure_quick <prompt>`\n\n"
             "_Powered by 5etools database + Gemini 2.0 Flash_ 🎲",
             parse_mode="Markdown"
         )
         return
     
+    # Messaggio di avvio generazione
+    await message.answer(
+        "🎲 **Generando avventura completa...**\n\n"
+        "Sto creando un'avventura dettagliata con:\n"
+        "📖 Background completo\n"
+        "⚔️ Encounters dettagliati\n"  
+        "👥 NPCs con personalità\n"
+        "🏰 Locations descritte\n"
+        "📜 Hooks e handouts\n\n"
+        "_Questo richiederà alcuni minuti..._ ⚡",
+        parse_mode="Markdown"
+    )
+    
     try:
-        logger.info(f"Generazione avventura: {prompt}")
+        logger.info(f"Generazione avventura avanzata: {prompt}")
         
-        # Genera avventura usando RAG esistente
-        adventure = adventure_creator.create_adventure(prompt)
+        # Importa e usa l'Advanced Adventure Creator
+        import sys
+        sys.path.append('/app')  # Path container
         
-        # Formatta risposta
-        response = adventure_creator.format_quick_summary(adventure)
+        try:
+            from advanced_adventure_creator import AdvancedAdventureCreator, send_complete_adventure_async
+        except ImportError:
+            # Fallback se modulo non trovato
+            logger.warning("Advanced Adventure Creator non trovato - fallback a versione rapida")
+            adventure = adventure_creator.create_adventure(prompt)
+            response = adventure_creator.format_quick_summary(adventure)
+            await message.answer(f"⚠️ **Versione Rapida (Fallback)**\n\n{response}", parse_mode="Markdown")
+            return
         
-        await message.answer(response, parse_mode="Markdown")
+        # Crea l'adventure creator avanzato
+        advanced_creator = AdvancedAdventureCreator(
+            generate_content_func=generate_content_safe,
+            search_5etools_func=search_5etools
+        )
+        
+        # Genera avventura completa
+        user_id = message.from_user.id
+        complete_adventure = await advanced_creator.create_complete_adventure(prompt, user_id)
+        
+        # Invia in parti multiple
+        await send_complete_adventure_async(message, complete_adventure, bot)
+        
+        # Salva in sessione per continuity
+        session_memory.add_message(
+            user_id, 
+            f"/adventure {prompt}", 
+            f"Generated complete adventure with {len(complete_adventure)} sections"
+        )
         
     except Exception as e:
-        logger.error(f"Errore creazione avventura: {e}")
-        await message.answer("❌ Glitch arcano nell'Adventure Creator! Riprova 🎲")
+        logger.error(f"Errore Advanced Adventure Creator: {e}")
+        
+        # Fallback al vecchio sistema
+        try:
+            adventure = adventure_creator.create_adventure(prompt)
+            response = adventure_creator.format_quick_summary(adventure)
+            
+            await message.answer(
+                f"⚠️ **Avventura Rapida (Fallback)**\n\n{response}\n\n"
+                f"_Sistema avanzato non disponibile - generata versione rapida._",
+                parse_mode="Markdown"
+            )
+        except Exception as e2:
+            logger.error(f"Errore anche nel fallback: {e2}")
+            await message.answer("❌ Glitch arcano nell'Adventure Creator! Riprova 🎲")
+
+@dp.message(Command("adventure_quick"))
+async def adventure_quick_handler(message: types.Message):
+    """Crea avventura rapida (riassunto veloce)"""
+    
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    
+    prompt = message.text.replace("/adventure_quick", "").strip()
+    if not prompt:
+        await message.answer(
+            "🎯 **Adventure Creator Rapido**\n\n"
+            "Genera solo riassunto veloce dell'avventura.\n\n"
+            "**Uso:** `/adventure_quick <descrizione>`\n"
+            "**Esempio:** `/adventure_quick Grotta goblin livello 3`"
+        )
+        return
+    
+    try:
+        logger.info(f"Generazione avventura rapida: {prompt}")
+        
+        adventure = adventure_creator.create_adventure(prompt)
+        response = adventure_creator.format_quick_summary(adventure)
+        
+        # Salva in sessione
+        user_id = message.from_user.id
+        session_memory.add_message(user_id, f"/adventure_quick {prompt}", response)
+        
+        await message.answer(f"🎯 **Avventura Rapida**\n\n{response}", parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Errore Adventure Quick: {e}")
+        await message.answer("🎲 Errore nella generazione dell'avventura rapida. Riprova!")
 
 @dp.message(Command("adventure_md"))
 async def adventure_markdown_handler(message: types.Message):
@@ -829,7 +914,7 @@ async def help_handler(message: types.Message):
     """Comando help aggiornato con Adventure Creator e Session Memory"""
     
     help_text = """🎲 **CODEX20 - IL CUSTODE DEI TOMI**
-*Versione 2.1 con Session Memory*
+*Versione 2.2 con Advanced Adventure Creator*
 
 📖 **CONSULTAZIONE D&D 5E:**
 Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
@@ -838,26 +923,31 @@ Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
 👤 **GENERAZIONE PERSONAGGI:**
 *"Crea un mago elfo livello 3"* → Scheda PDF completa
 
-🗺️ **ADVENTURE CREATOR:**
-• `/adventure <prompt>` - Avventura completa bilanciata
+🗺️ **ADVENTURE CREATOR AVANZATO:**
+• `/adventure <prompt>` - **Avventura completa dettagliata** (multi-parte)
+• `/adventure_quick <prompt>` - Avventura rapida (solo riassunto)  
 • `/adventure_md <prompt>` - Con markdown Homebrewery
 
-🧠 **GESTIONE MEMORIA (NUOVO!):**
+🧠 **GESTIONE MEMORIA:**
 • `/memory` - Info sulla memoria della conversazione
 • `/forget` - Cancella la memoria e ricomincia da capo
 
-**Esempi Adventures:**
+**Esempi Adventure Complete:**
 • `/adventure Grotta goblin per 4 PCs livello 3`
 • `/adventure Torre mago abbandonata livello 5`  
 • `/adventure Castello infestato dai fantasmi`
 • `/adventure Nave pirata per party esperto`
+
+**Differenze:**
+• **`/adventure`** = Avventura completa con background, encounters dettagliati, NPCs, locations, hooks (6 parti)
+• **`/adventure_quick`** = Solo riassunto veloce con statistiche base
 
 🔧 **UTILITÀ:**
 • `/mappa` - Debug mapping campi PDF
 • `/help` - Questo messaggio
 
 *Powered by Gemini 2.0 Flash + 34MB 5etools database*
-*Ora con memoria di conversazione per interazioni più fluide!* 🎲"""
+*Adventure Creator ora genera avventure complete utilizzabili al tavolo!* 🎲"""
     
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -1014,7 +1104,8 @@ async def setup_bot_commands():
     
     commands = [
         types.BotCommand(command="help", description="📖 Guida completa e lista comandi"),
-        types.BotCommand(command="adventure", description="🎲 Crea avventura completa bilanciata"),
+        types.BotCommand(command="adventure", description="🎲 Avventura completa dettagliata (multi-parte)"),
+        types.BotCommand(command="adventure_quick", description="🎯 Avventura rapida (solo riassunto)"),
         types.BotCommand(command="adventure_md", description="📜 Avventura con markdown Homebrewery"),
         types.BotCommand(command="memory", description="🧠 Info sulla memoria conversazione"),
         types.BotCommand(command="forget", description="🗑️ Cancella memoria e ricomincia"),
