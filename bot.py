@@ -1009,8 +1009,30 @@ async def chat_handler(message: types.Message):
 # ==========================================
 # BOOTSTRAP
 # ==========================================
+async def setup_bot_commands():
+    """Registra i comandi del bot con Telegram all'avvio"""
+    
+    commands = [
+        types.BotCommand(command="help", description="📖 Guida completa e lista comandi"),
+        types.BotCommand(command="adventure", description="🎲 Crea avventura completa bilanciata"),
+        types.BotCommand(command="adventure_md", description="📜 Avventura con markdown Homebrewery"),
+        types.BotCommand(command="memory", description="🧠 Info sulla memoria conversazione"),
+        types.BotCommand(command="forget", description="🗑️ Cancella memoria e ricomincia"),
+        types.BotCommand(command="mappa", description="🔧 Debug mapping campi PDF"),
+    ]
+    
+    try:
+        await bot.set_my_commands(commands, scope=types.BotCommandScopeDefault())
+        logger.info("✅ Bot commands registered successfully!")
+    except Exception as e:
+        logger.error(f"❌ Error registering commands: {e}")
+
 async def main():
     logger.info("Avvio di Codex20 - Il Custode dei Tomi")
+    
+    # Register bot commands on startup
+    await setup_bot_commands()
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
