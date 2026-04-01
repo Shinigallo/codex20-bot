@@ -23,6 +23,50 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
+# SESSION MEMORY - IMMEDIATE FIX
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+
+class QuickSessionManager:
+    """Session memory veloce per fix immediato"""
+    
+    def __init__(self):
+        self.sessions = defaultdict(lambda: deque(maxlen=10))  # Max 10 messaggi per user
+        self.last_activity = defaultdict(lambda: datetime.now())
+    
+    def add_message(self, user_id: int, user_msg: str, bot_response: str):
+        """Aggiunge messaggio alla memoria"""
+        self.last_activity[user_id] = datetime.now()
+        self.sessions[user_id].append({
+            'user': user_msg[:500],  # Limita lunghezza per context window
+            'bot': bot_response[:800], 
+            'time': datetime.now()
+        })
+    
+    def get_context(self, user_id: int) -> str:
+        """Recupera contesto conversazione"""
+        if user_id not in self.sessions or not self.sessions[user_id]:
+            return ""
+        
+        # Prendi ultimi 3 messaggi
+        recent = list(self.sessions[user_id])[-3:]
+        
+        context = "\n\nCONVERSAZIONE PRECEDENTE:\n"
+        for msg in recent:
+            context += f"User: {msg['user']}\nCodex20: {msg['bot']}\n\n"
+        
+        return context
+    
+    def clear_session(self, user_id: int):
+        """Cancella sessione"""
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+        if user_id in self.last_activity:
+            del self.last_activity[user_id]
+
+# Inizializza session manager
+session_memory = QuickSessionManager()
+
 # ==========================================
 # CONFIGURAZIONE INIZIALE E LOGGING
 # ==========================================
@@ -782,10 +826,10 @@ async def adventure_markdown_handler(message: types.Message):
 
 @dp.message(Command("help"))
 async def help_handler(message: types.Message):
-    """Comando help aggiornato con Adventure Creator"""
+    """Comando help aggiornato con Adventure Creator e Session Memory"""
     
     help_text = """🎲 **CODEX20 - IL CUSTODE DEI TOMI**
-*Versione 2.0 con Adventure Creator*
+*Versione 2.1 con Session Memory*
 
 📖 **CONSULTAZIONE D&D 5E:**
 Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
@@ -794,9 +838,13 @@ Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
 👤 **GENERAZIONE PERSONAGGI:**
 *"Crea un mago elfo livello 3"* → Scheda PDF completa
 
-🗺️ **ADVENTURE CREATOR (NUOVO!):**
+🗺️ **ADVENTURE CREATOR:**
 • `/adventure <prompt>` - Avventura completa bilanciata
 • `/adventure_md <prompt>` - Con markdown Homebrewery
+
+🧠 **GESTIONE MEMORIA (NUOVO!):**
+• `/memory` - Info sulla memoria della conversazione
+• `/forget` - Cancella la memoria e ricomincia da capo
 
 **Esempi Adventures:**
 • `/adventure Grotta goblin per 4 PCs livello 3`
@@ -809,9 +857,42 @@ Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
 • `/help` - Questo messaggio
 
 *Powered by Gemini 2.0 Flash + 34MB 5etools database*
-*Adventure Creator usa RAG ufficiale per encounters bilanciati!* 🎲"""
+*Ora con memoria di conversazione per interazioni più fluide!* 🎲"""
     
     await message.answer(help_text, parse_mode="Markdown")
+
+@dp.message(Command("memory"))
+async def memory_command(message: types.Message):
+    """Mostra info sessione corrente"""
+    user_id = message.from_user.id
+    
+    session_count = len(session_memory.sessions.get(user_id, []))
+    last_activity = session_memory.last_activity.get(user_id)
+    
+    if last_activity:
+        last_activity_str = last_activity.strftime('%H:%M del %d/%m')
+    else:
+        last_activity_str = "Mai"
+    
+    await message.answer(
+        f"🧠 **Memoria Sessione**\n\n"
+        f"• Messaggi salvati: {session_count}/10\n"
+        f"• Ultima attività: {last_activity_str}\n"
+        f"• Sessione attiva: {'Sì' if session_count > 0 else 'No'}\n\n"
+        f"_La memoria mantiene gli ultimi 10 messaggi per conversazioni più fluide._",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("forget"))
+async def forget_command(message: types.Message):
+    """Cancella memoria sessione"""
+    user_id = message.from_user.id
+    session_memory.clear_session(user_id)
+    
+    await message.answer(
+        "🧠 **Memoria cancellata!**\n\n"
+        "La conversazione ripartirà da zero dal prossimo messaggio. 🎲"
+    )
 
 @dp.message(F.text)
 async def chat_handler(message: types.Message):
