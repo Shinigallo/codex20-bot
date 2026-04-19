@@ -24,14 +24,48 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
 # SESSION MEMORY - IMMEDIATE FIX
-from persistent_sessions import PersistentSessionManager
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 
-# Inizializza session manager con storage persistente
-session_memory = PersistentSessionManager(
-    db_path="data/sessions.db",
-    max_messages=20,
-    ttl_hours=72
-)
+class QuickSessionManager:
+    """Session memory veloce per fix immediato"""
+    
+    def __init__(self):
+        self.sessions = defaultdict(lambda: deque(maxlen=10))  # Max 10 messaggi per user
+        self.last_activity = defaultdict(lambda: datetime.now())
+    
+    def add_message(self, user_id: int, user_msg: str, bot_response: str):
+        """Aggiunge messaggio alla memoria"""
+        self.last_activity[user_id] = datetime.now()
+        self.sessions[user_id].append({
+            'user': user_msg[:500],  # Limita lunghezza per context window
+            'bot': bot_response[:800], 
+            'time': datetime.now()
+        })
+    
+    def get_context(self, user_id: int) -> str:
+        """Recupera contesto conversazione"""
+        if user_id not in self.sessions or not self.sessions[user_id]:
+            return ""
+        
+        # Prendi ultimi 3 messaggi
+        recent = list(self.sessions[user_id])[-3:]
+        
+        context = "\n\nCONVERSAZIONE PRECEDENTE:\n"
+        for msg in recent:
+            context += f"User: {msg['user']}\nCodex20: {msg['bot']}\n\n"
+        
+        return context
+    
+    def clear_session(self, user_id: int):
+        """Cancella sessione"""
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+        if user_id in self.last_activity:
+            del self.last_activity[user_id]
+
+# Inizializza session manager
+session_memory = QuickSessionManager()
 
 # ==========================================
 # CONFIGURAZIONE INIZIALE E LOGGING
