@@ -59,6 +59,30 @@ def is_admin(user_id: int) -> bool:
     """Controlla se l'utente è un amministratore"""
     return user_id in ADMIN_IDS
 
+def validate_user_api_key(api_key: str) -> bool:
+    """
+    Valida una chiave API Gemini in modo isolato senza interferire
+    con la configurazione globale del sistema.
+    """
+    try:
+        # Test the key with a separate import to avoid conflicts
+        import importlib
+        user_genai = importlib.import_module('google.generativeai')
+        
+        # Configure with user's key
+        user_genai.configure(api_key=api_key)
+        test_model = user_genai.GenerativeModel("gemini-2.0-flash")
+        
+        # Simple validation test
+        test_response = test_model.generate_content("Hello")
+        
+        # If we get here, the key works
+        return True
+        
+    except Exception as e:
+        logger.warning(f"API key validation failed: {str(e)}")
+        return False
+
 def is_authorized(user_id: int) -> bool:
     """Controlla se l'utente è autorizzato ad usare il bot"""
     return user_id in AUTHORIZED_USERS or is_owner(user_id)
@@ -1044,14 +1068,18 @@ async def register_handler(message: types.Message):
         await message.reply("❌ Invalid API key format. Keys should start with 'AIza' and be longer than 35 characters.")
         return
     
-    # Test della chiave API (validazione live)
-    try:
-        genai.configure(api_key=api_key)
-        test_model = genai.GenerativeModel("gemini-2.0-flash")
-        test_response = test_model.generate_content("Test")
-        
-        # Se arriviamo qui, la chiave funziona
-        AUTHORIZED_USERS.add(user_id)
+    # Test della chiave API (validazione isolata)
+    if not validate_user_api_key(api_key):
+        await message.reply(
+            f"❌ API key validation failed. Please check your key and try again.\n\n"
+            "Make sure your key is valid and has available quota.\n"
+            "Get a valid key at: https://aistudio.google.com/app/apikey"
+        )
+        logger.warning(f"Failed registration attempt by user {user_id}: Invalid API key")
+        return
+    
+    # API key validation successful
+    AUTHORIZED_USERS.add(user_id)
         
         user_info = {
             'username': message.from_user.username,
