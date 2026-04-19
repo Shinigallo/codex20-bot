@@ -48,8 +48,84 @@ logger = logging.getLogger(__name__)
 OWNER_ID = int(os.getenv("AUTHORIZED_USER_ID", "323785285"))
 ADMIN_IDS = {OWNER_ID}  # Altri admin possono essere aggiunti qui
 
-# Lista utenti autorizzati (il database verrà implementato nel prossimo update)
-AUTHORIZED_USERS = {OWNER_ID}  # Owner sempre autorizzato
+import sqlite3
+from pathlib import Path
+
+# ==========================================
+# DATABASE SETUP FOR USER MANAGEMENT
+# ==========================================
+
+def init_user_database():
+    """Inizializza il database degli utenti"""
+    db_path = Path("data/users.db")
+    db_path.parent.mkdir(exist_ok=True)
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            api_key_hash TEXT,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'active'
+        )
+    """)
+    
+    # Assicura che l'owner sia sempre nel database
+    cursor.execute("""
+        INSERT OR IGNORE INTO authorized_users (user_id, username, first_name, status) 
+        VALUES (?, ?, ?, ?)
+    """, (OWNER_ID, "DYenkis", "Dario", "owner"))
+    
+    conn.commit()
+    conn.close()
+
+def add_authorized_user(user_id: int, username: str = None, first_name: str = None, api_key: str = None):
+    """Aggiunge un utente autorizzato al database"""
+    conn = sqlite3.connect("data/users.db")
+    cursor = conn.cursor()
+    
+    # Simple hash for API key (in production use proper encryption)
+    api_key_hash = hash(api_key) if api_key else None
+    
+    cursor.execute("""
+        INSERT OR REPLACE INTO authorized_users (user_id, username, first_name, api_key_hash, status)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, username, first_name, api_key_hash, "active"))
+    
+    conn.commit()
+    conn.close()
+
+def is_user_authorized_db(user_id: int) -> bool:
+    """Controlla se l'utente è autorizzato nel database"""
+    if is_owner(user_id):
+        return True
+        
+    conn = sqlite3.connect("data/users.db")
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "SELECT status FROM authorized_users WHERE user_id = ?", 
+        (user_id,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    
+    return result is not None and result[0] == "active"
+
+def get_authorized_users():
+    """Ottiene lista utenti autorizzati"""
+    conn = sqlite3.connect("data/users.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT user_id, username, first_name, status FROM authorized_users")
+    users = cursor.fetchall()
+    conn.close()
+    
+    return users
 
 def is_owner(user_id: int) -> bool:
     """Controlla se l'utente è il proprietario del bot"""
@@ -85,7 +161,7 @@ def validate_user_api_key(api_key: str) -> bool:
 
 def is_authorized(user_id: int) -> bool:
     """Controlla se l'utente è autorizzato ad usare il bot"""
-    return user_id in AUTHORIZED_USERS or is_owner(user_id)
+    return is_user_authorized_db(user_id) or is_owner(user_id)
 
 # Sistema di Resilienza: Rotazione automatica API Keys per aggirare i rate-limits (HTTP 429)
 API_KEYS = os.getenv("GEMINI_API_KEYS", "").split(",")
@@ -1079,11 +1155,12 @@ async def register_handler(message: types.Message):
         return
     
     # API key validation successful
-    AUTHORIZED_USERS.add(user_id)
-        
-        user_info = {
-            'username': message.from_user.username,
-            'first_name': message.from_user.first_name,
+    add_authorized_user(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        api_key=api_key
+    )
             'api_key': api_key  # In futuro serà criptato nel database
         }
         
@@ -1119,7 +1196,8 @@ async def admin_users_handler(message: types.Message):
         await message.reply("❌ Admin access required.")
         return
     
-    user_list = "\n".join([f"• {uid}" for uid in AUTHORIZED_USERS])
+    users = get_authorized_users()
+    user_list = "\n".join([f"• {user[0]} ({user[1] or 'N/A'}) - {user[3]}" for user in users])
     await message.reply(
         f"📋 **Authorized Users:**\n{user_list}\n\n"
         f"👑 **Owner:** {OWNER_ID} (permanent access)"
@@ -1139,7 +1217,7 @@ async def admin_add_user_handler(message: types.Message):
     
     try:
         user_id = int(args[1])
-        AUTHORIZED_USERS.add(user_id)
+        add_authorized_user(user_id, "Manual_Admin_Add", "Admin_Added")
         await message.reply(f"✅ User {user_id} added to allowlist.")
         logger.info(f"Admin {message.from_user.id} added user {user_id} to allowlist")
     except ValueError:
@@ -1520,4 +1598,8 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Initialize user database
+    init_user_database()
+    logger.info("✅ User database initialized")
+    
     asyncio.run(main())
