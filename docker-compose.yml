@@ -1,91 +1,34 @@
-# Codex20 Bot v2.2 - Container Orchestration
-# Enhanced D&D Assistant with API Proxy and Owner Privileges
-
 version: '3.8'
 
 services:
-  codex20-bot:
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    container_name: codex20-python
-    restart: unless-stopped
-    
-    # Environment variables
-    environment:
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - GEMINI_API_KEYS=${GEMINI_API_KEYS}
-      - AUTHORIZED_USER_ID=323785285
-      - TZ=UTC
-    
-    # Volume mounts for persistent data
+  # Setup wizard (first-time only)
+  setup:
+    build: .
+    container_name: codex20-setup
     volumes:
-      - ./data:/app/data:rw
-      - ./logs:/app/logs:rw
-    
-    # Health check
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/sessions.db').execute('SELECT 1')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    
-    # Resource limits
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
-    
-    # Logging configuration
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    
-    # Network configuration
-    networks:
-      - codex20-network
-
-  # Optional: Database management service
-  codex20-db-manager:
-    image: alpine:latest
-    container_name: codex20-db-manager
-    restart: "no"
+      - .:/app
+    working_dir: /app
+    command: ["python", "setup.py"]
     profiles:
-      - maintenance
+      - setup
+
+  # Main application
+  codex20:
+    build: .
+    container_name: codex20-python
+    ports:
+      - "8085:8084"
     volumes:
-      - ./data:/data:rw
-    command: |
-      sh -c "
-        apk add --no-cache sqlite &&
-        echo 'Database management container ready' &&
-        sleep infinity
-      "
-    networks:
-      - codex20-network
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - setup
+    profiles:
+      - app
 
 networks:
-  codex20-network:
-    driver: bridge
+  default:
     name: codex20-network
-
-# Volume definitions for explicit management
-volumes:
-  codex20-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/data
-  codex20-logs:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/logs

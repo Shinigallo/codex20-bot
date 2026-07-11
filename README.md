@@ -1,283 +1,167 @@
-# 🎲 Codex20 v2.2 - Enhanced D&D Assistant Bot
+# 🎲 Codex20 OpenRouter
 
-**Advanced Telegram bot for Dungeon Masters and D&D 5e players with AI-powered assistance, persistent sessions, and semantic D&D knowledge integration.**
+Assistente D&D 5e con interfaccia web e Telegram, powered by OpenRouter AI.
 
-## 🐳 **CONTAINER-FIRST ARCHITECTURE**
+## 🚀 Installazione Rapida
 
-### **✅ Always Containerized Deployment**
-- **Docker-based** - No bare metal installations
-- **docker-compose orchestration** - Professional container management
-- **Health monitoring** - Built-in container health checks
-- **Persistent volumes** - Data survives container updates
-- **Resource limits** - Controlled CPU/memory usage
+### Prerequisiti
+- Docker e Docker Compose
+- OpenRouter API Key (gratuita su https://openrouter.ai)
 
----
-
-## 🚀 **Quick Start (Container Deployment)**
-
-### **1. Prerequisites**
+### Setup Interattivo (Prima volta)
 ```bash
-# Ensure Docker and docker-compose are installed
-docker --version
-docker-compose --version
+# Clona il repository
+git clone https://github.com/tu-username/codex20-openrouter.git
+cd codex20-openrouter
+
+# Avvia il wizard di setup
+python setup.py
 ```
 
-### **2. Environment Setup**
+Il wizard ti guiderà attraverso:
+1. Creazione utente admin
+2. Iniezione API key OpenRouter
+3. Selezione modello AI
+4. Generazione configurazione
+
+### Avvio Servizio
 ```bash
-# Create .env file with your credentials
-cp .env.example .env
-# Edit .env with your API keys:
-# TELEGRAM_TOKEN=your_bot_token_here
-# GEMINI_API_KEYS=key1,key2,key3  # Multiple keys for rotation
+# Avvia il servizio principale
+docker compose up -d
+
+# Controlla lo stato
+docker compose logs -f
 ```
 
-### **3. Deploy Container**
+## 🌐 Interfaccia Web
+
+Accedi all'interfaccia web:
+- **URL**: http://localhost:8085
+- **Login**: Utente creato durante il setup
+
+### Funzionalità
+- 💬 Chat con assistente AI
+- 📁 Upload/Download materiale campagna
+- 👥 Multi-utente con autenticazione
+- 🔄 Fallback automatico modelli
+
+## 📱 Bot Telegram
+
+### Configurazione
+1. Crea un bot su Telegram con @BotFather
+2. Ottieni il token
+3. Aggiungi al .env:
 ```bash
-# One-command deployment
-./deploy.sh
-
-# Or manual deployment
-docker-compose up -d
+TELEGRAM_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
 ```
 
-### **4. Monitor Container**
+### Avvio Bot
 ```bash
-# Interactive health dashboard
-./monitor.sh
-
-# View logs
-docker logs -f codex20-python
+docker compose run --rm bot
 ```
 
----
+## ⚙️ Configurazione
 
-## 👑 **OWNER PRIVILEGES & SECURITY**
+### Variabili d'Ambiente
+| Variabile | Descrizione | Default |
+|-----------|-------------|---------|
+| `OPENROUTER_API_KEY` | API key OpenRouter | - |
+| `MODEL_NAME` | Modello AI principale | `google/gemma-4-31b-it:free` |
+| `BACKUP_MODEL_NAME` | Modello di backup | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+| `ADMIN_USERNAME` | Username admin | `admin` |
+| `ADMIN_PASSWORD` | Password admin (hash) | - |
 
-### **🔐 Owner Access (Dario)**
-- **User ID:** `323785285` - **PERMANENT ACCESS**
-- **System API Keys** - Uses proxy rotation (no personal limits)
-- **Admin Commands** - Full bot management capabilities
-- **Zero Rate Limits** - Intelligent API key rotation
-
-### **🛡️ Multi-User Security System**
-- **New Users** → Must register with personal Gemini API key
-- **Registration Flow** → `/register AIzaSyC...your-key-here`
-- **API Validation** → Live testing of provided keys
-- **Cost Distribution** → Each user provides own API quota
-
----
-
-## 🎯 **ENHANCED FEATURES V2.2**
-
-### **🧠 Persistent Session Memory**
-- **SQLite Database** - Conversation persistence across restarts
-- **20 Messages per User** - Contextual memory retention
-- **72-Hour TTL** - Automatic cleanup of old sessions
-- **Campaign Tracking** - Long-term campaign information storage
-
-### **🔄 Intelligent API Proxy System**
-- **Multi-Key Rotation** - Automatic failover on rate limits
-- **Health Monitoring** - Real-time API key status tracking
-- **Load Balancing** - Optimal distribution across available keys
-- **Emergency Protocols** - Graceful handling of system-wide limits
-
-### **📚 Semantic D&D Knowledge**
-- **5etools Integration** - Official D&D 5e rule grounding
-- **Semantic Search** - `/search_rules <query>` for rule lookups
-- **Campaign Memory** - `/remember_campaign` and `/recall_campaign`
-- **MemPalace Ready** - Future integration with semantic knowledge base
-
----
-
-## 🎲 **COMMAND REFERENCE**
-
-### **🎯 Core D&D Commands**
-```
-/adventure <prompt>     - Generate detailed D&D adventures
-/adventure_quick        - Quick adventure summaries
-/search_rules <query>   - Semantic D&D 5e rule lookup
-/remember_campaign      - Store campaign information
-/recall_campaign        - Retrieve campaign memories
-```
-
-### **👑 Owner/Admin Commands**
-```
-/admin_users           - List authorized users
-/admin_add_user <id>   - Add user to allowlist
-/proxy_status          - API proxy system health
-```
-
-### **🔐 User Management**
-```
-/start                 - Bot introduction and access check
-/register <api-key>    - Register with personal Gemini key
-/help                  - Complete command guide
-```
-
----
-
-## 🐳 **CONTAINER ARCHITECTURE**
-
-### **📁 Directory Structure**
-```
-codex20-bot/
-├── Dockerfile              # Container definition
-├── docker-compose.yml      # Orchestration config  
-├── deploy.sh              # Automated deployment
-├── monitor.sh             # Health monitoring
-├── bot.py                 # Main application
-├── persistent_sessions.py # Session management
-├── requirements.txt       # Python dependencies
-├── .env                  # Environment variables
-└── data/                 # Persistent data volume
-    ├── sessions.db       # Session database
-    └── 5etools/         # D&D rule data
-```
-
-### **🔧 Container Features**
-- **Base Image:** `python:3.12-slim`
-- **Health Checks:** SQLite database connectivity
-- **Volume Mounts:** Persistent data and logs
-- **Resource Limits:** CPU/Memory constraints
-- **Automatic Restart:** `unless-stopped` policy
-- **Logging:** JSON file driver with rotation
-
----
-
-## 📊 **MONITORING & MANAGEMENT**
-
-### **🔍 Health Dashboard**
+### Modelli Disponibili
 ```bash
-./monitor.sh  # Interactive monitoring interface
+# Modifica .env con il modello desiderato
+MODEL_NAME=google/gemma-4-31b-it:free
+# Oppure:
+MODEL_NAME=qwen/qwen3.5:free
+MODEL_NAME=meta-llama/llama-3.3-70b-instruct:free
 ```
 
-### **📋 Container Operations**
+## 🛠️ Sviluppo
+
+### Struttura Progetto
+```
+codex20-openrouter/
+├── app.py              # FastAPI backend
+├── setup.py            # Setup wizard
+├── bot.py              # Telegram bot
+├── core/
+│   ├── api_client.py   # OpenRouter client
+│   ├── session.py      # Gestione sessioni
+│   ├── users.py        # Gestione utenti
+│   └── rag.py          # RAG regole D&D
+├── static/
+│   └── index.html      # Interfaccia web
+├── data/               # Database SQLite
+└── logs/               # Log applicativi
+```
+
+### Avvio Locale
 ```bash
-# View status
-docker-compose ps
+# Installa dipendenze
+pip install -r requirements.txt
 
-# View logs
-docker logs -f codex20-python
+# Avvia setup
+python setup.py
 
-# Restart container
-docker-compose restart
-
-# Update deployment
-docker-compose pull && docker-compose up -d
-
-# Shell access
-docker exec -it codex20-python /bin/bash
+# Avvia server
+uvicorn app:app --host 0.0.0.0 --port 8084
 ```
 
-### **💾 Data Management**
+## 🔒 Sicurezza
+
+- Password hashate con SHA256
+- JWT tokens per autenticazione
+- API key non esposte nei log
+- CORS configurato per produzione
+
+## 📊 Monitoraggio
+
 ```bash
-# Backup data
-docker cp codex20-python:/app/data ./backup-$(date +%Y%m%d)
+# Controlla log
+docker compose logs -f codex20
 
-# Restore data  
-docker cp ./backup-data codex20-python:/app/data
+# Stato API
+curl http://localhost:8085/api/status
 
-# Database access
-docker exec -it codex20-python sqlite3 /app/data/sessions.db
+# Test connessione
+curl http://localhost:8085/api/test
 ```
+
+## 🐛 Troubleshooting
+
+### Container non avvia
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+### API 429 Rate Limit
+Il sistema usa automaticamente il modello di backup quando il principale è rate-limited.
+
+### Password dimenticata
+```bash
+docker exec -it codex20-python python -c "
+from core.users import register_user
+register_user('admin', 'nuova-password')
+"
+```
+
+## 📝 License
+
+MIT License - Vedi LICENSE file
+
+## 🤝 Contributi
+
+1. Fork il progetto
+2. Crea branch feature
+3. Commit cambiamenti
+4. Push e Pull Request
 
 ---
 
-## ⚡ **DEPLOYMENT BENEFITS**
-
-### **🛡️ Security Advantages**
-- **Isolated Environment** - Container sandboxing
-- **No System Dependencies** - Self-contained deployment
-- **Controlled Access** - Only exposed ports and volumes
-- **Easy Updates** - Replace container without system changes
-
-### **🚀 Operational Benefits**
-- **Consistent Deployment** - Same environment across hosts
-- **Easy Scaling** - Container replication and load balancing
-- **Health Monitoring** - Built-in health checks and monitoring
-- **Resource Control** - CPU and memory limitations
-- **Backup/Restore** - Simple data volume management
-
-### **💰 Cost Efficiency**
-- **Multi-User Architecture** - Each user provides own API keys
-- **Intelligent Proxy** - Maximizes free tier usage
-- **Owner Privileges** - System keys for unlimited owner access
-- **Resource Optimization** - Minimal container resource usage
-
----
-
-## 🎯 **PRODUCTION DEPLOYMENT**
-
-### **🔧 PiNas Installation**
-```bash
-# SSH into PiNas
-ssh dario@192.168.8.11
-
-# Navigate to bot directory  
-cd /root/codex20-bot-work/
-
-# Deploy enhanced version
-./deploy.sh
-
-# Monitor deployment
-./monitor.sh
-```
-
-### **📈 Scaling Considerations**
-- **Multiple API Keys** - Add more keys to proxy pool for higher limits
-- **Container Resources** - Adjust CPU/memory limits based on usage
-- **Database Optimization** - Monitor SQLite performance and size
-- **Log Management** - Configure log rotation and retention policies
-
----
-
-## 🎲 **INTEGRATION FEATURES**
-
-### **🧠 MemPalace Integration (Future)**
-- **Semantic Memory** - Enhanced D&D knowledge retrieval
-- **Campaign Knowledge Base** - Long-term campaign information storage
-- **Rule Grounding** - Accurate D&D 5e rule references
-- **Performance Target** - <200ms semantic queries
-
-### **📚 5etools Data**
-- **Official Rules** - Complete D&D 5e rule integration
-- **JSON Parsing** - Structured data extraction from official sources
-- **Semantic Search** - Keyword-based rule lookup
-- **Context Grounding** - AI responses backed by official data
-
----
-
-## 🛠️ **TROUBLESHOOTING**
-
-### **🔍 Common Issues**
-```bash
-# Container won't start
-docker logs codex20-python
-
-# API key issues
-docker exec -it codex20-python python -c "from bot import get_model; print(get_model())"
-
-# Database problems
-docker exec -it codex20-python sqlite3 /app/data/sessions.db ".tables"
-
-# Permission issues
-sudo chown -R $(id -u):$(id -g) ./data ./logs
-```
-
-### **🚑 Recovery Procedures**
-```bash
-# Full container rebuild
-docker-compose down
-docker rmi codex20-bot-work-python-bot
-./deploy.sh
-
-# Database reset
-docker exec -it codex20-python rm /app/data/sessions.db
-docker-compose restart
-```
-
----
-
-**🎲 Ready to enhance your D&D campaigns with AI-powered assistance!**
-
-**Container-first architecture ensures reliable, scalable, and maintainable deployment across any Docker-capable host.**
+**Created with ❤️ by Dario & Codex20 Team**

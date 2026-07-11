@@ -1,1605 +1,378 @@
 """
-Codex20 - Il Custode dei Tomi 🎲
-Bot Telegram basato su AI per Dungeon Master e Giocatori di D&D 5e.
-Integra Gemini 2.0 Flash, consultazione dinamica dei tomi (5etools) e
-generazione automatica di schede personaggio in formato PDF.
+Codex20 v3.1 - OpenRouter Fork
+Bot Telegram AI per D&D 5e con OpenRouter + Gemma4
+
+Multi-utente con API key rotation, RAG, PDF generation, adventure creator.
 """
 
 import os
+import sys
 import json
-import random
-import glob
-import asyncio
 import logging
-import re
-import io
-
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import FSInputFile
-from google import generativeai as genai
+from typing import Optional
 from dotenv import load_dotenv
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 
-# SESSION MEMORY - IMMEDIATE FIX
-from persistent_sessions import PersistentSessionManager
-
-# Inizializza session manager con storage persistente
-session_memory = PersistentSessionManager(
-    db_path="data/sessions.db",
-    max_messages=20,
-    ttl_hours=72
-)
-
-# ==========================================
-# CONFIGURAZIONE INIZIALE E LOGGING
-# ==========================================
+# Load environment
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/codex20.log", mode="w"),
+    ],
+)
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# SISTEMA DI AUTORIZZAZIONE E OWNER PRIVILEGES
-# ==========================================
+# Add parent to path for imports
+sys.path.insert(0, os.path.dirname(__file__))
 
-# Owner del bot - SEMPRE abilitato
-OWNER_ID = int(os.getenv("AUTHORIZED_USER_ID", "323785285"))
-ADMIN_IDS = {OWNER_ID}  # Altri admin possono essere aggiunti qui
+# Import core modules
+from core.api_client import OpenRouterClient, DEFAULT_MODEL
+from core.session import PersistentSessionManager
+from core.rag import search_5etools
 
-import sqlite3
-from pathlib import Path
+# Import handlers
+from handlers.adventure import handle_adventure
+from handlers.search import handle_search
+from handlers.memory import handle_remember, handle_recall, handle_memory, handle_forget
+from handlers.admin import handle_help, handle_admin_users, handle_admin_add_user, handle_proxy_status
 
-# ==========================================
-# DATABASE SETUP FOR USER MANAGEMENT
-# ==========================================
+# Import PDF (optional)
+try:
+    from pdf.character_sheet import create_pdf
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
-def init_user_database():
-    """Inizializza il database degli utenti"""
-    db_path = Path("data/users.db")
-    db_path.parent.mkdir(exist_ok=True)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS authorized_users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            api_key_hash TEXT,
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'active'
-        )
-    """)
-    
-    # Assicura che l'owner sia sempre nel database
-    cursor.execute("""
-        INSERT OR IGNORE INTO authorized_users (user_id, username, first_name, status) 
-        VALUES (?, ?, ?, ?)
-    """, (OWNER_ID, "DYenkis", "Dario", "owner"))
-    
-    conn.commit()
-    conn.close()
+# Bot token
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN non impostato! Exit.")
+    sys.exit(1)
 
-def add_authorized_user(user_id: int, username: str = None, first_name: str = None, api_key: str = None):
-    """Aggiunge un utente autorizzato al database"""
-    conn = sqlite3.connect("data/users.db")
-    cursor = conn.cursor()
-    
-    # Simple hash for API key (in production use proper encryption)
-    api_key_hash = hash(api_key) if api_key else None
-    
-    cursor.execute("""
-        INSERT OR REPLACE INTO authorized_users (user_id, username, first_name, api_key_hash, status)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, username, first_name, api_key_hash, "active"))
-    
-    conn.commit()
-    conn.close()
+# Owner ID
+AUTHORIZED_USER_ID = os.getenv("AUTHORIZED_USER_ID", "323785285")
 
-def is_user_authorized_db(user_id: int) -> bool:
-    """Controlla se l'utente è autorizzato nel database"""
-    if is_owner(user_id):
-        return True
-        
-    conn = sqlite3.connect("data/users.db")
-    cursor = conn.cursor()
-    
-    cursor.execute(
-        "SELECT status FROM authorized_users WHERE user_id = ?", 
-        (user_id,)
-    )
-    result = cursor.fetchone()
-    conn.close()
-    
-    return result is not None and result[0] == "active"
+# Initialize components
+openrouter_client = OpenRouterClient()
+session_manager = PersistentSessionManager()
 
-def get_authorized_users():
-    """Ottiene lista utenti autorizzati"""
-    conn = sqlite3.connect("data/users.db")
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT user_id, username, first_name, status FROM authorized_users")
-    users = cursor.fetchall()
-    conn.close()
-    
-    return users
+# Adventure creator (if available)
+try:
+    from advanced_adventure_creator import AdvancedAdventureCreator
+    adventure_creator = AdvancedAdventureCreator()
+    logger.info("Adventure Creator Advanced caricato")
+except ImportError:
+    logger.warning("AdvancedAdventureCreator non trovato, fallback base")
+    adventure_creator = None
 
-def is_owner(user_id: int) -> bool:
-    """Controlla se l'utente è il proprietario del bot"""
-    return user_id == OWNER_ID
+# Authorize owner (no API key needed)
+authorized_user_ids: set = {int(AUTHORIZED_USER_ID)}
 
-def is_admin(user_id: int) -> bool:
-    """Controlla se l'utente è un amministratore"""
-    return user_id in ADMIN_IDS
+# --- Initialize bot and dispatcher BEFORE handlers ---
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.filters import Command
 
-def validate_user_api_key(api_key: str) -> bool:
-    """
-    Valida una chiave API Gemini in modo isolato senza interferire
-    con la configurazione globale del sistema.
-    """
-    try:
-        # Test the key with a separate import to avoid conflicts
-        import importlib
-        user_genai = importlib.import_module('google.generativeai')
-        
-        # Configure with user's key
-        user_genai.configure(api_key=api_key)
-        test_model = user_genai.GenerativeModel("gemini-2.0-flash")
-        
-        # Simple validation test
-        test_response = test_model.generate_content("Hello")
-        
-        # If we get here, the key works
-        return True
-        
-    except Exception as e:
-        logger.warning(f"API key validation failed: {str(e)}")
-        return False
-
-def is_authorized(user_id: int) -> bool:
-    """Controlla se l'utente è autorizzato ad usare il bot"""
-    return is_user_authorized_db(user_id) or is_owner(user_id)
-
-# Sistema di Resilienza: Rotazione automatica API Keys per aggirare i rate-limits (HTTP 429)
-API_KEYS = os.getenv("GEMINI_API_KEYS", "").split(",")
-current_key_index = 0
-
-def get_model():
-    """
-    Configura e restituisce l'istanza del modello Gemini corrente.
-    Utilizza la chiave API selezionata tramite rotazione.
-    """
-    global current_key_index
-    key = API_KEYS[current_key_index].strip()
-    genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-2.0-flash")
-
-# Inizializzazione Bot Telegram (Aiogram 3.x)
-bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
+bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-async def generate_content_safe(prompt):
-    """
-    Invia un prompt a Gemini in modo sicuro.
-    Gestisce automaticamente l'errore 429 (Quota Exceeded) ruotando 
-    la chiave API alla successiva disponibile e riprovando.
-    """
-    global current_key_index
-    for _ in range(len(API_KEYS)):
-        try:
-            model = get_model()
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                logger.warning(f"Quota superata per la chiave {current_key_index}, rotazione in corso...")
-                current_key_index = (current_key_index + 1) % len(API_KEYS)
-                continue
-            raise e
-    return None
+# --- Generic chat handler (non-command messages) ---
+@dp.message(~Command())
+async def cmd_chat(message: Message):
+    """Risponde a messaggi normali (non comandi) con AI."""
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ Accesso non autorizzato.")
+        return
+    prompt = message.text.strip()
+    if not prompt:
+        return
+    prompt = prompt[:3000]  # Limite lunghezza
+    response = await handle_chat(message, bot, user_id, openrouter_client,
+                                 session_manager, search_5etools, prompt, response)
+    await bot.send_message(message.chat.id, response)
 
-# ==========================================
-# LOGICA RAG: RICERCA NEI TOMI (5ETOOLS)
-# ==========================================
-def search_5etools(query):
-    """
-    Scansiona ricorsivamente i file JSON nella directory dei tomi (5etools).
-    Estrae dati rilevanti basati sulle keyword per fare "grounding" delle
-    risposte dell'AI, garantendo fedeltà alle regole ufficiali.
-    """
-    data_dir = os.path.join("data", "5etools")
-    if not os.path.exists(data_dir): 
-        return ""
-    
-    found_data = ""
-    # Estrae parole chiave significative ignorando congiunzioni brevi
-    keywords = [k.lower() for k in query.split() if len(k) > 3]
-    if not keywords: 
-        return ""
-    
-    for file_path in glob.glob(os.path.join(data_dir, "**", "*.json"), recursive=True):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = json.load(f)
-                for key, collection in content.items():
-                    if isinstance(collection, list) and key not in ["_meta", "linkedFile"]:
-                        for item in collection:
-                            if isinstance(item, dict) and "name" in item:
-                                if any(k in item["name"].lower() for k in keywords):
-                                    found_data += f"\n[{key.upper()} - {os.path.basename(file_path)}]:\n{json.dumps(item, indent=2)}\n"
-                                    # Limite per non eccedere la context window del modello AI
-                                    if len(found_data) > 6000: break 
-                        if len(found_data) > 6000: break
-        except Exception as e: 
-            continue
-        if len(found_data) > 6000: break
-            
-    return f"\n\nDATI TECNICI DAI TOMI (5ETOOLS):\n{found_data}" if found_data else ""
 
-def get_personality_context():
-    """
-    Carica e assembla il System Prompt.
-    Istruisce Gemini sul suo ruolo, sul formato output (JSON) richiesto
-    per la generazione dei PDF, e carica ulteriori tratti di personalità
-    dai file SOUL.md, IDENTITY.md, USER.md se presenti.
-    """
-    context = """Sei Codex20, un assistente digitale evoluto e Dungeon Master esperto. Rispondi in italiano.\n
-    IMPORTANTE: Se l'utente ti chiede di creare un personaggio o una scheda, genera i dati tecnici completi e rispondi fornendo un blocco JSON racchiuso tra ```json e ``` contenente tutte le chiavi necessarie:
-    (nome, razza, classe, livello, background, forza, destrezza, costituzione, intelligenza, saggezza, carisma, 
-    competenze_salvezza: [lista di stats],
-    competenze_abilita: [lista di abilità],
-    ca, iniziativa, velocita, hp_max,
-    incantesimi: { "0": ["lista cantrips"], "1": ["lista liv 1"], ... "9": ["lista liv 9"] },
-    slot_incantesimi: { "1": 4, "2": 3, ... },
-    caratteristica_incantesimi: "Intelligenza/Saggezza/Carisma",
-    competenze: "stringa descrittiva", 
-    equipaggiamento, descrizione_breve).
-    
-    Usa i nomi standard in italiano per le abilità: acrobazia, addestrare animali, arcano, atletica, furtività, indagare, inganno, intuizione, intimidire, medicina, natura, percezione, perspicacia, persuasione, rapidità di mano, religione, sopravvivenza, storia.
-    Usa i dati forniti dai Tomi per essere accurato con le regole di D&D 5e."""
-    
-    data_dir = "data"
-    for file_name in ["SOUL.md", "IDENTITY.md", "USER.md"]:
-        path = os.path.join(data_dir, file_name)
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                context += f"\nINFORMAZIONI DI PERSONALITÀ:\n{f.read()}\n"
-    return context
-
-system_context_base = get_personality_context()
-
-# ==========================================
-# ADVENTURE CREATOR INTEGRATION
-# ==========================================
-
-import tempfile
-
-class AdventureCreator:
-    """Adventure creator integrato in Codex20 usando RAG esistente"""
-    
-    def create_adventure(self, prompt: str):
-        """Crea avventura usando il sistema RAG esistente"""
-        
-        # Analisi prompt
-        requirements = self._analyze_prompt(prompt)
-        
-        # Usa la funzione search_5etools esistente per ottenere dati
-        monster_data = search_5etools(f"CR {requirements['party_level']} monster")
-        
-        # Genera avventura
-        adventure = {
-            'title': self._generate_title(requirements),
-            'requirements': requirements,
-            'encounters': self._create_encounters(requirements),
-            'npcs': self._create_npcs(requirements),
-            'treasure': self._create_treasure(requirements),
-            'background': self._create_background(requirements),
-            'estimated_duration': self._estimate_duration(requirements),
-            'xp_budget': self._calculate_xp_budget(requirements)
-        }
-        
-        return adventure
-    
-    def _analyze_prompt(self, prompt: str):
-        """Estrae requisiti dal prompt"""
-        
-        # Estrai livello party
-        level_match = re.search(r'(?:livello?|level?|lv\.?)\s*(\d+)', prompt.lower())
-        party_level = int(level_match.group(1)) if level_match else 3
-        
-        # Estrai dimensione party
-        size_match = re.search(r'(\d+)\s*(?:pcs?|giocatori|characters?|players?)', prompt.lower())
-        party_size = int(size_match.group(1)) if size_match else 4
-        
-        # Estrai ambientazione
-        setting = 'dungeon'  # default
-        setting_keywords = {
-            'grotta': 'cave', 'cave': 'cave',
-            'torre': 'tower', 'tower': 'tower',
-            'castello': 'castle', 'castle': 'castle',
-            'foresta': 'forest', 'forest': 'forest',
-            'bosco': 'forest', 'woods': 'forest',
-            'città': 'city', 'city': 'city',
-            'nave': 'ship', 'ship': 'ship',
-            'dungeon': 'dungeon'
-        }
-        
-        for keyword, setting_type in setting_keywords.items():
-            if keyword in prompt.lower():
-                setting = setting_type
-                break
-        
-        # Estrai tema
-        theme = 'mixed'  # default
-        theme_keywords = {
-            'goblin': 'goblinoids', 'orchi': 'goblinoids',
-            'non morti': 'undead', 'undead': 'undead', 'fantasmi': 'undead',
-            'drago': 'dragons', 'dragon': 'dragons',
-            'banditi': 'bandits', 'briganti': 'bandits',
-            'mago': 'magical', 'magic': 'magical', 'wizard': 'magical',
-            'cultist': 'cult', 'culto': 'cult'
-        }
-        
-        for keyword, theme_type in theme_keywords.items():
-            if keyword in prompt.lower():
-                theme = theme_type
-                break
-        
-        return {
-            'party_level': party_level,
-            'party_size': party_size,
-            'setting': setting,
-            'theme': theme,
-            'focus': 'balanced'
-        }
-    
-    def _generate_title(self, req):
-        """Genera titolo avventura"""
-        setting_names = {
-            'cave': ['Le Grotte Oscure', 'Le Caverne Nascoste', 'Gli Antichi Sotterranei'],
-            'tower': ['La Torre Misteriosa', 'La Guglia del Mago', 'La Torre Perduta'],
-            'castle': ['Il Castello Infestato', 'La Fortezza in Rovina', 'Il Maniero Abbandonato'],
-            'forest': ['Il Bosco Sussurrante', 'La Foresta Oscura', 'Il Boschetto Incantato'],
-            'city': ['Ombre in Città', 'Il Mistero Urbano', 'Città di Segreti'],
-            'ship': ['La Nave Fantasma', 'Pirati dell\'Alto Mare', 'Il Vascello Perduto'],
-            'dungeon': ['Il Dungeon Dimenticato', 'Profondità del Pericolo', 'Le Antiche Rovine']
-        }
-        
-        titles = setting_names.get(req['setting'], ['L\'Avventura Misteriosa'])
-        return random.choice(titles)
-    
-    def _create_encounters(self, req):
-        """Crea encounters bilanciati"""
-        
-        encounters = []
-        party_level = req['party_level']
-        
-        # Encounters base per livello
-        if party_level <= 2:
-            encounter_types = ['easy', 'medium', 'hard', 'medium']
-            base_monsters = ['Goblin', 'Bandit', 'Wolf', 'Orc']
-        elif party_level <= 5:
-            encounter_types = ['medium', 'hard', 'hard', 'deadly']
-            base_monsters = ['Hobgoblin', 'Bugbear', 'Owlbear', 'Ogre']
-        else:
-            encounter_types = ['hard', 'deadly', 'hard', 'deadly']
-            base_monsters = ['Young Dragon', 'Troll', 'Giant', 'Vampire Spawn']
-        
-        for i, difficulty in enumerate(encounter_types):
-            encounter = {
-                'title': f'Scontro {i+1}' if i < 3 else 'Boss Finale',
-                'type': 'combat' if i < 3 else 'boss',
-                'difficulty': difficulty,
-                'description': f'Uno scontro di difficoltà {difficulty} appropriato per il party.',
-                'monsters': [{'name': base_monsters[i % len(base_monsters)], 'cr': max(1, party_level - 1 + i)}],
-                'cr_total': max(1, party_level - 1 + i)
-            }
-            encounters.append(encounter)
-        
-        return encounters
-    
-    def _create_npcs(self, req):
-        """Crea NPCs"""
-        npcs = [
-            {
-                'name': 'Anziano del Villaggio',
-                'role': 'Quest Giver',
-                'description': 'Un umano anziano che fornisce la missione iniziale.',
-                'personality': 'Saggio ma preoccupato per gli eventi recenti.',
-                'stats': 'Usa le statistiche del Nobile (Monster Manual)'
-            }
+async def handle_chat(message, bot, user_id, api_client, session_mgr, search_fn, prompt):
+    """Invia prompt al modello OpenRouter e risponde."""
+    # Build system prompt with 5e knowledge
+    system_prompt = (
+        "Sei un assistente D&D 5e esperto. Rispondi in modo conciso e utile "
+        "alle domande del giocatore. Usa regole ufficiali D&D 5e quando possibile. "
+        "Se non sai la risposta, dì che non lo sai."
+    )
+    # Add RAG context if available
+    rag_context = await search_fn(prompt) if search_fn else ""
+    full_prompt = f"{system_prompt}\n\nContexto da regole:\n{rag_context}\n\nDomanda: {prompt}"
+    # Truncate if too long
+    if len(full_prompt) > 4000:
+        full_prompt = full_prompt[:4000]
+    response = await api_client.chat_completion(
+        model=DEFAULT_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": full_prompt}
         ]
-        
-        if req['theme'] == 'magical':
-            npcs.append({
-                'name': 'Apprendista Mago',
-                'role': 'Alleato',
-                'description': 'Un giovane mago che può aiutare il party.',
-                'personality': 'Entusiasta ma inesperto.',
-                'stats': 'Usa le statistiche del Mage (Monster Manual)'
-            })
-        else:
-            npcs.append({
-                'name': 'Mercante Catturato',
-                'role': 'NPC da Salvare',
-                'description': 'Un halfling mercante preso prigioniero.',
-                'personality': 'Grato ma traumatizzato dalla prigionia.',
-                'stats': 'Usa le statistiche del Commoner'
-            })
-        
-        return npcs
-    
-    def _create_treasure(self, req):
-        """Crea tesoro appropriato al livello"""
-        level = req['party_level']
-        
-        # Oro basato sul livello (per DMG guidelines)
-        gold_amounts = {
-            1: '50-100', 2: '100-200', 3: '200-400', 4: '400-800', 5: '800-1200'
-        }
-        
-        # Magic items per livello
-        magic_items = []
-        if level >= 2:
-            magic_items.append('Pozione di Cura')
-        if level >= 3:
-            magic_items.append('Pergamena Magica')
-        if level >= 4:
-            magic_items.append('Arma +1')
-        if level >= 5:
-            magic_items.append('Mantello di Protezione')
-        
-        return {
-            'gold': gold_amounts.get(level, '100-200'),
-            'magic_items': magic_items,
-            'consumables': ['Pozione di Cura', 'Antidoto'],
-            'special': 'Mappa antica con agganci per future avventure'
-        }
-    
-    def _create_background(self, req):
-        """Crea background avventura"""
-        setting = req['setting']
-        theme = req['theme']
-        
-        backgrounds = {
-            'cave': {
-                'background': f'Una rete di grotte è diventata pericolosa a causa dell\'attività di {theme}.',
-                'hook': 'I locali segnalano viaggiatori scomparsi e strani suoni dalle grotte.',
-                'setting_details': 'Grotte calcaree buie con multiple camere e corsi d\'acqua sotterranei.'
-            },
-            'tower': {
-                'background': f'Una torre di mago abbandonata mostra segni di presenza {theme}.',
-                'hook': 'Disturbi magici emanano dalla torre presumibilmente vuota.',
-                'setting_details': 'Una torre di pietra alta con multipli piani e trappole magiche.'
-            },
-            'castle': {
-                'background': f'Un antico castello nasconde una minaccia legata a {theme}.',
-                'hook': 'Strani eventi si verificano nel castello che si credeva disabitato.',
-                'setting_details': 'Un castello medievale con torri, cortili e segrete sotterranee.'
-            }
-        }
-        
-        return backgrounds.get(setting, {
-            'background': f'Eventi recenti legati a {theme} minacciano l\'area locale.',
-            'hook': 'Il party viene avvicinato dalle autorità riguardo a una minaccia crescente.',
-            'setting_details': f'L\'avventura si svolge in un ambiente di tipo {setting}.'
-        })
-    
-    def _estimate_duration(self, req):
-        """Stima durata sessione"""
-        encounters = 4  # Standard
-        
-        if encounters <= 2:
-            return "2-3 ore (sessione breve)"
-        elif encounters <= 4:
-            return "4-6 ore (sessione lunga)"
-        else:
-            return "6+ ore (sessioni multiple)"
-    
-    def _calculate_xp_budget(self, req):
-        """Calcola budget XP per encounters"""
-        # XP budget per personaggio per livello (semplificato)
-        xp_per_level = {
-            1: 75, 2: 150, 3: 225, 4: 300, 5: 375
-        }
-        
-        base_xp = xp_per_level.get(req['party_level'], 150)
-        return base_xp * req['party_size']
-    
-    def format_quick_summary(self, adventure):
-        """Formatta avventura come riassunto rapido"""
-        req = adventure['requirements']
-        
-        summary = f"""🎲 **{adventure['title']}**
+    )
+    return response
 
-📊 **Dettagli Avventura:**
-• Party: {req['party_size']} caratteri livello {req['party_level']}
-• Ambientazione: {req['setting'].title()}
-• Tema: {req['theme'].title()}
-• Durata: {adventure['estimated_duration']}
 
-⚔️ **Encounters ({len(adventure['encounters'])}):**"""
-        
-        for i, enc in enumerate(adventure['encounters'], 1):
-            monsters = [m['name'] for m in enc.get('monsters', [])]
-            summary += f"\n{i}. **{enc['title']}** - {', '.join(monsters)}"
-        
-        summary += f"""
+# --- Bot Commands ---
 
-👥 **NPCs ({len(adventure['npcs'])}):**"""
-        for npc in adventure['npcs']:
-            summary += f"\n• **{npc['name']}** ({npc['role']})"
-        
-        summary += f"""
+async def cmd_help(message, user_id, bot):
+    """Mostra guida completa."""
+    response = await handle_help(message, bot, user_id, authorized_user_ids)
+    if not response.startswith("⚠️"):
+        await bot.send_message(message.chat.id, response)
 
-💰 **Tesoro:** {adventure['treasure']['gold']} gp"""
-        if adventure['treasure']['magic_items']:
-            summary += f", {', '.join(adventure['treasure']['magic_items'][:2])}"
-        
-        summary += f"""
 
-🎭 **Adventure Hook:**
-_{adventure['background']['hook']}_
+async def cmd_adventure(message, user_id, bot, prompt, adventure_type):
+    """Crea avventura."""
+    response = await handle_adventure(
+        message, bot, user_id, openrouter_client,
+        session_manager, search_5etools,
+        adventure_creator, prompt, adventure_type
+    )
+    await bot.send_message(message.chat.id, response)
 
-🎯 **XP Budget:** {adventure.get('xp_budget', 'Variable')} XP
 
-_Usa `/adventure_md` per markdown completo! 🎲_
-"""
-        
-        return summary
-    
-    def format_homebrewery_markdown(self, adventure):
-        """Formatta avventura come Homebrewery markdown"""
-        req = adventure['requirements']
-        
-        markdown = f"""# {adventure['title']}
-*Un'avventura per {req['party_size']} personaggi di livello {req['party_level']}*
+async def cmd_search(message, user_id, bot, query):
+    """Ricerca regole."""
+    response = await handle_search(
+        message, bot, user_id, openrouter_client,
+        session_manager, search_5etools, query
+    )
+    await bot.send_message(message.chat.id, response)
 
-## Panoramica dell'Avventura
-{adventure['background']['background']}
 
-### Adventure Hook
-> {adventure['background']['hook']}
+async def cmd_remember(message, user_id, bot, info):
+    """Salva info campagna."""
+    response = await handle_remember(
+        message, bot, user_id, openrouter_client,
+        session_manager, info
+    )
+    await bot.send_message(message.chat.id, response)
 
-### Dettagli Ambientazione
-{adventure['background']['setting_details']}
 
----
+async def cmd_recall(message, user_id, bot, query):
+    """Ricorda info campagna."""
+    response = await handle_recall(
+        message, bot, user_id, openrouter_client,
+        session_manager, query
+    )
+    await bot.send_message(message.chat.id, response)
 
-## Encounters
 
-"""
-        
-        for i, enc in enumerate(adventure['encounters'], 1):
-            markdown += f"""### {enc['title']}
-**Tipo:** {enc['type'].title()}  
-**Difficoltà:** {enc['difficulty'].title()}  
-**CR Totale:** {enc.get('cr_total', '?')}
+async def cmd_memory(message, user_id, bot):
+    """Info sessione."""
+    response = await handle_memory(message, bot, user_id, session_manager)
+    await bot.send_message(message.chat.id, response)
 
-{enc['description']}
 
-**Creature:**"""
-            
-            for monster in enc.get('monsters', []):
-                markdown += f"""
-- **{monster['name']}** (CR {monster.get('cr', '?')})"""
-            
-            markdown += "\n\n---\n\n"
-        
-        markdown += f"""## NPCs
+async def cmd_forget(message, user_id, bot):
+    """Cancella memoria."""
+    response = await handle_forget(message, bot, user_id, session_manager)
+    await bot.send_message(message.chat.id, response)
 
-"""
-        for npc in adventure['npcs']:
-            markdown += f"""### {npc['name']}
-*{npc['role']}*
 
-**Descrizione:** {npc['description']}  
-**Personalità:** {npc['personality']}  
-**Statistiche:** {npc['stats']}
+async def cmd_admin_users(message, user_id, bot):
+    """Lista utenti autorizzati."""
+    response = await handle_admin_users(message, bot, user_id, authorized_user_ids)
+    await bot.send_message(message.chat.id, response)
 
-"""
-        
-        markdown += f"""## Tesoro e Ricompense
 
-- **Oro:** {adventure['treasure']['gold']} gp per personaggio"""
-        
-        if adventure['treasure']['magic_items']:
-            markdown += f"""
-- **Oggetti Magici:** {', '.join(adventure['treasure']['magic_items'])}"""
-        
-        markdown += f"""
-- **Consumabili:** {', '.join(adventure['treasure']['consumables'])}
-- **Speciale:** {adventure['treasure']['special']}
+async def cmd_admin_add(message, user_id, bot, new_id):
+    """Aggiungi utente."""
+    new_id_raw = message.text.replace("/admin_add_user ", "")
+    new_id = new_id_raw.strip()
+    if not new_id or not new_id.isdigit() or len(new_id) > 20:
+        await bot.send_message(message.chat.id, "⚠️ ID utente deve essere un numero valido (max 20 cifre).")
+        return
+    response = await handle_admin_add_user(
+        message, bot, user_id, authorized_user_ids, new_id
+    )
+    await bot.send_message(message.chat.id, response)
 
----
 
-*Generato da Codex20 Adventure Creator*
-"""
-        
-        return markdown
+async def cmd_proxy_status(message, user_id, bot):
+    """Status API."""
+    response = await handle_proxy_status(message, bot, user_id, openrouter_client)
+    await bot.send_message(message.chat.id, response)
 
-# Inizializza Adventure Creator
-adventure_creator = AdventureCreator()
 
-# ==========================================
-# FUNZIONI DI UTILITÀ D&D
-# ==========================================
-def calculate_modifier(score):
-    """Calcola il modificatore di caratteristica D&D 5e."""
-    return (score - 10) // 2
-
-def get_proficiency_bonus(level):
-    """Calcola il bonus di competenza in base al livello."""
-    try:
-        lvl = int(level)
-        return 2 + (lvl - 1) // 4
-    except:
-        return 2
-
-# ==========================================
-# GENERAZIONE SCHEDA PDF
-# ==========================================
-def create_pdf(char, user_id):
-    """
-    Riceve il dizionario JSON generato da Gemini e lo mappa sui
-    campi AcroForm del PDF interattivo '5E_CharacterSheet_Fillable.pdf'.
-    Genera un file temporaneo per l'utente, pronto per l'invio su Telegram.
-    """
-    template_path = "5E_CharacterSheet_Fillable.pdf"
-    output_path = f"data/pg_{user_id}.pdf"
-    
-    if not os.path.exists(template_path):
-        logger.error(f"Template PDF non trovato in {template_path}")
-        return None
-
-    prof_bonus = get_proficiency_bonus(char.get('livello', 1))
-    
-    # Mapping base informazioni generali
-    field_data = {
-        'CharacterName': char.get('nome', ''),
-        'Race ': char.get('razza', ''),
-        'ClassLevel': f"{char.get('classe', '')} {char.get('livello', '1')}",
-        'Background': char.get('background', ''),
-        'ProfBonus': f"+{prof_bonus}",
-        'AC': str(char.get('ca', 10)),
-        'Initiative': str(char.get('iniziativa', 0)),
-        'Speed': str(char.get('velocita', 30)),
-        'HPMax': str(char.get('hp_max', 10)),
-        'HPCurrent': str(char.get('hp_max', 10)),
-    }
-
-    # Mapping Caratteristiche, Modificatori e Tiri Salvezza
-    stats_map = {
-        'forza': ('STR', 'STRmod', 'ST Strength', 'Check Box 11'),
-        'destrezza': ('DEX', 'DEXmod ', 'ST Dexterity', 'Check Box 18'),
-        'costituzione': ('CON', 'CONmod', 'ST Constitution', 'Check Box 19'),
-        'intelligenza': ('INT', 'INTmod', 'ST Intelligence', 'Check Box 20'),
-        'saggezza': ('WIS', 'WISmod', 'ST Wisdom', 'Check Box 21'),
-        'carisma': ('CHA', 'CHamod', 'ST Charisma', 'Check Box 22')
-    }
-
-    comp_salvezza = [s.lower() for s in char.get('competenze_salvezza', [])]
-    
-    for stat_ita, (pdf_score, pdf_mod, pdf_save, pdf_check) in stats_map.items():
-        val = char.get(stat_ita, 10)
-        mod = calculate_modifier(val)
-        field_data[pdf_score] = str(val)
-        field_data[pdf_mod] = f"+{mod}" if mod >= 0 else str(mod)
-        
-        save_val = mod
-        if stat_ita in comp_salvezza:
-            save_val += prof_bonus
-            field_data[pdf_check] = "Yes"
-        field_data[pdf_save] = f"+{save_val}" if save_val >= 0 else str(save_val)
-
-    # Mapping Abilità (Skills)
-    skills_map = {
-        'acrobazia': ('Acrobatics', 'Check Box 23', 'destrezza'),
-        'addestrare animali': ('Animal', 'Check Box 24', 'saggezza'),
-        'arcano': ('Arcana', 'Check Box 25', 'intelligenza'),
-        'atletica': ('Athletics', 'Check Box 26', 'forza'),
-        'inganno': ('Deception ', 'Check Box 27', 'carisma'),
-        'storia': ('History ', 'Check Box 28', 'intelligenza'),
-        'intuizione': ('Insight', 'Check Box 29', 'saggezza'),
-        'intimidire': ('Intimidation', 'Check Box 30', 'carisma'),
-        'indagare': ('Investigation ', 'Check Box 31', 'intelligenza'),
-        'medicina': ('Medicine', 'Check Box 32', 'saggezza'),
-        'natura': ('Nature', 'Check Box 33', 'intelligenza'),
-        'percezione': ('Perception ', 'Check Box 34', 'saggezza'),
-        'performance': ('Performance', 'Check Box 35', 'carisma'),
-        'persuasione': ('Persuasion', 'Check Box 36', 'carisma'),
-        'religione': ('Religion', 'Check Box 37', 'intelligenza'),
-        'rapidità di mano': ('SleightofHand', 'Check Box 38', 'destrezza'),
-        'furtività': ('Stealth ', 'Check Box 39', 'destrezza'),
-        'sopravvivenza': ('Survival', 'Check Box 40', 'saggezza')
-    }
-
-    comp_abilita = [a.lower() for a in char.get('competenze_abilita', [])]
-    for abil_ita, (pdf_field, pdf_check, base_stat) in skills_map.items():
-        stat_val = char.get(base_stat, 10)
-        mod = calculate_modifier(stat_val)
-        if abil_ita in comp_abilita:
-            mod += prof_bonus
-            field_data[pdf_check] = "Yes"
-        field_data[pdf_field] = f"+{mod}" if mod >= 0 else str(mod)
-        
-        if abil_ita == 'percezione':
-            field_data['Passive'] = str(10 + mod)
-
-    # --- INCANTESIMI E SLOT ---
-    spell_ability = char.get('caratteristica_incantesimi', 'Saggezza').lower()
-    spell_stat_val = char.get(spell_ability, 10)
-    spell_mod = calculate_modifier(spell_stat_val)
-    
-    field_data['Spellcasting Class 2'] = char.get('classe', '')
-    field_data['SpellcastingAbility 2'] = spell_ability.capitalize()
-    field_data['SpellSaveDC  2'] = str(8 + prof_bonus + spell_mod)
-    field_data['SpellAtkBonus 2'] = f"+{prof_bonus + spell_mod}"
-
-    # Spell Slots (Livelli 1-9)
-    slots_data = char.get('slot_incantesimi', {})
-    for lvl in range(1, 10):
-        s_val = str(slots_data.get(str(lvl), ''))
-        if s_val:
-            field_data[f'SlotsTotal {18+lvl}'] = s_val
-            field_data[f'SlotsRemaining {18+lvl}'] = s_val
-
-    # Mapping Meticoloso per gli ID dei campi Spells sulla scheda PDF ufficiale
-    spell_names_mapping = {
-        '0': ['Spells 1014', 'Spells 1016', 'Spells 1017', 'Spells 1018', 'Spells 1019', 'Spells 1020', 'Spells 1021', 'Spells 1022'],
-        '1': ['Spells 1015', 'Spells 1023', 'Spells 1024', 'Spells 1025', 'Spells 1026', 'Spells 1027', 'Spells 1028', 'Spells 1029', 'Spells 1030', 'Spells 1031', 'Spells 1032', 'Spells 1033'],
-        '2': ['Spells 1046', 'Spells 1034', 'Spells 1035', 'Spells 1036', 'Spells 1037', 'Spells 1038', 'Spells 1039', 'Spells 1040', 'Spells 1041', 'Spells 1042', 'Spells 1043', 'Spells 1044', 'Spells 1045'],
-        '3': ['Spells 1048', 'Spells 1047', 'Spells 1049', 'Spells 1050', 'Spells 1051', 'Spells 1052', 'Spells 1053', 'Spells 1054', 'Spells 1055', 'Spells 1056', 'Spells 1057', 'Spells 1058', 'Spells 1059'],
-        '4': ['Spells 1060', 'Spells 1061', 'Spells 1062', 'Spells 1063', 'Spells 1064', 'Spells 1065', 'Spells 1066', 'Spells 1067', 'Spells 1068', 'Spells 1069', 'Spells 1070', 'Spells 1071', 'Spells 1072'],
-        '5': ['Spells 1074', 'Spells 1073', 'Spells 1075', 'Spells 1076', 'Spells 1077', 'Spells 1078', 'Spells 1079', 'Spells 1080', 'Spells 1081'],
-        '6': ['Spells 1083', 'Spells 1082', 'Spells 1084', 'Spells 1085', 'Spells 1086', 'Spells 1087', 'Spells 1088', 'Spells 1089', 'Spells 1090'],
-        '7': ['Spells 1091', 'Spells 1092', 'Spells 1093', 'Spells 1094', 'Spells 1095', 'Spells 1096', 'Spells 1097', 'Spells 1098', 'Spells 1099'],
-        '8': ['Spells 10101', 'Spells 10100', 'Spells 10102', 'Spells 10103', 'Spells 10104', 'Spells 10105', 'Spells 10106'],
-        '9': ['Spells 10108', 'Spells 10107', 'Spells 10109', 'Spells 101010', 'Spells 101011', 'Spells 101012', 'Spells 101013']
-    }
-    
-    incantesimi_dict = char.get('incantesimi', {})
-    for lvl_str, field_list in spell_names_mapping.items():
-        lista = incantesimi_dict.get(lvl_str, [])
-        for i, spell_name in enumerate(lista):
-            if i < len(field_list):
-                field_data[field_list[i]] = spell_name
-
-    field_data['ProficienciesLanguages'] = char.get('competenze', '')
-    field_data['Equipment'] = char.get('equipaggiamento', '')
-    field_data['Backstory'] = char.get('descrizione_breve', '')
-
-    # --- Generazione Overlay Grafico ---
-    # Poiché pypdf puro non "scrive" i campi testuali per la visualizzazione normale, 
-    # creiamo un layer grafico sovrapposto (con reportlab) che riempie visivamente i form.
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=letter)
-    reader = PdfReader(template_path)
-    
-    for page in reader.pages:
-        if "/Annots" in page:
-            for annot in page["/Annots"]:
-                obj = annot.get_object()
-                if "/T" in obj:
-                    field_name = obj["/T"]
-                    if field_name in field_data:
-                        text = str(field_data[field_name])
-                        rect = obj.get("/Rect")
-                        if rect:
-                            x1, y1, x2, y2 = map(float, rect)
-                            width, height = x2 - x1, y2 - y1
-                            
-                            if "Check Box" in field_name:
-                                # Inserisce un pallino al centro della checkbox
-                                can.setFont("Helvetica", 12)
-                                can.drawString(x1 + (width-8)/2, y1 + (height-8)/2, "•")
-                            else:
-                                font_size = min(height * 0.6, 10)
-                                can.setFont("Helvetica", font_size)
-                                can.drawString(x1 + 2, y1 + (height - font_size) / 2 + 1, text)
-        can.showPage()
-    
-    can.save()
-    packet.seek(0)
-    new_pdf = PdfReader(packet)
-    writer = PdfWriter()
-    
-    for i, page in enumerate(reader.pages):
-        if i < len(new_pdf.pages):
-            page.merge_page(new_pdf.pages[i])
-        if "/Annots" in page:
-            del page["/Annots"] # Rimuove le annots originali per rendere il PDF flat
-        writer.add_page(page)
-    
-    with open(output_path, 'wb') as f:
-        writer.write(f)
-    
-    return output_path
-
-# ==========================================
-# SISTEMA DI AUTORIZZAZIONE E MIDDLEWARE
-# ==========================================
-
-ONBOARDING_MESSAGE = """
-🎲 **Welcome to Codex20 - The Ultimate D&D Bot!**
-
-🔒 **Access Required**
-To use this advanced D&D bot, you need your own Google Gemini API key.
-
-📋 **How to get your Gemini API Key:**
-
-1. **Visit Google AI Studio:**
-   → https://aistudio.google.com/app/apikey
-
-2. **Create API Key:**
-   → Click "Create API Key"
-   → Choose "Create API key in new project" or existing project
-   → Copy your key (starts with "AIza...")
-
-3. **Register with this bot:**
-   → `/register AIzaSyC...your-key-here`
-
-4. **Start using enhanced D&D features:**
-   → `/search_rules` - Semantic D&D rules lookup
-   → `/remember_campaign` - Store campaign information
-   → `/recall_campaign` - Retrieve campaign memories
-   → Persistent sessions, campaign memory, semantic search
-
-🔐 **Your API key is stored securely and used only for your requests.**
-🎲 **Enjoy unlimited D&D assistance with your personal API quota!**
-
-Need help? Contact @DYenkis for assistance.
-"""
-
-async def check_authorization(message: types.Message) -> bool:
-    """
-    Middleware di autorizzazione: controlla se l'utente può usare il bot.
-    
-    - Owner (Dario): SEMPRE abilitato, usa le system API keys
-    - Admin: Sempre abilitati
-    - Altri utenti: Devono registrarsi con la propria API key
-    """
+# Register commands
+@dp.message(Command("help"))
+async def cmd_help_handler(message: Message):
     user_id = message.from_user.id
-    
-    # Owner e Admin sempre abilitati
-    if is_owner(user_id) or is_admin(user_id):
-        logger.info(f"Owner/Admin access granted for user {user_id}")
-        return True
-    
-    # Altri utenti devono essere nella allowlist
-    if not is_authorized(user_id):
-        await message.reply(ONBOARDING_MESSAGE, parse_mode="Markdown")
-        logger.info(f"Unauthorized access attempt by user {user_id}")
-        return False
-    
-    return True
-
-# ==========================================
-# HANDLERS TELEGRAM
-# ==========================================
-@dp.message(Command("mappa"))
-async def send_map_debug(message: types.Message):
-    """Comando di utilità/debug: invia un file mappa (se esistente) per il mapping dei campi."""
-    map_path = "data/MAPPA_CAMPI_SPELL.pdf"
-    if os.path.exists(map_path):
-        await message.answer_document(FSInputFile(map_path), caption="Ecco la mappa tecnica dei campi Spell. Dimmi quali ID corrispondono ai vari livelli!")
+    if user_id in authorized_user_ids:
+        await cmd_help(message, user_id, bot)
     else:
-        await message.answer("File mappa non trovato. Generazione in corso, riprova tra 5 secondi.")
+        await bot.send_message(message.chat.id, "⚠️ Accesso non autorizzato.")
 
-@dp.message(Command("adventure"))
-async def adventure_handler(message: types.Message):
-    """Crea avventura D&D completa multi-parte - VERSIONE AVANZATA"""
-    
-    # Controllo autorizzazione
-    if not await check_authorization(message):
-        return
-    
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    prompt = message.text.replace("/adventure", "").strip()
-    if not prompt:
-        await message.answer(
-            "🎲 **CODEX20 ADVENTURE CREATOR AVANZATO**\n\n"
-            "Genera avventure D&D complete e dettagliate in più parti!\n\n"
-            "**Esempi:**\n"
-            "`/adventure Grotta goblin per 4 PCs livello 3`\n"
-            "`/adventure Torre mago per 6 giocatori livello 5`\n"
-            "`/adventure Castello fantasmi livello 4`\n"
-            "`/adventure Nave pirata per party esperto`\n\n"
-            "**Per avventura rapida:** `/adventure_quick <prompt>`\n\n"
-            "_Powered by 5etools database + Gemini 2.0 Flash_ 🎲",
-            parse_mode="Markdown"
-        )
-        return
-    
-    # Messaggio di avvio generazione
-    await message.answer(
-        "🎲 **Generando avventura completa...**\n\n"
-        "Sto creando un'avventura dettagliata con:\n"
-        "📖 Background completo\n"
-        "⚔️ Encounters dettagliati\n"  
-        "👥 NPCs con personalità\n"
-        "🏰 Locations descritte\n"
-        "📜 Hooks e handouts\n\n"
-        "_Questo richiederà alcuni minuti..._ ⚡",
-        parse_mode="Markdown"
-    )
-    
-    try:
-        logger.info(f"Generazione avventura avanzata: {prompt}")
-        
-        # Importa e usa l'Advanced Adventure Creator
-        import sys
-        sys.path.append('/app')  # Path container
-        
-        try:
-            from advanced_adventure_creator import AdvancedAdventureCreator, send_complete_adventure_async
-        except ImportError:
-            # Fallback se modulo non trovato
-            logger.warning("Advanced Adventure Creator non trovato - fallback a versione rapida")
-            adventure = adventure_creator.create_adventure(prompt)
-            response = adventure_creator.format_quick_summary(adventure)
-            await message.answer(f"⚠️ **Versione Rapida (Fallback)**\n\n{response}", parse_mode="Markdown")
-            return
-        
-        # Crea l'adventure creator avanzato
-        advanced_creator = AdvancedAdventureCreator(
-            generate_content_func=generate_content_safe,
-            search_5etools_func=search_5etools
-        )
-        
-        # Genera avventura completa
-        user_id = message.from_user.id
-        complete_adventure = await advanced_creator.create_complete_adventure(prompt, user_id)
-        
-        # Invia in parti multiple
-        await send_complete_adventure_async(message, complete_adventure, bot)
-        
-        # Salva in sessione per continuity
-        session_memory.add_message(
-            user_id, 
-            f"/adventure {prompt}", 
-            f"Generated complete adventure with {len(complete_adventure)} sections"
-        )
-        
-    except Exception as e:
-        logger.error(f"Errore Advanced Adventure Creator: {e}")
-        
-        # Fallback al vecchio sistema
-        try:
-            adventure = adventure_creator.create_adventure(prompt)
-            response = adventure_creator.format_quick_summary(adventure)
-            
-            await message.answer(
-                f"⚠️ **Avventura Rapida (Fallback)**\n\n{response}\n\n"
-                f"_Sistema avanzato non disponibile - generata versione rapida._",
-                parse_mode="Markdown"
-            )
-        except Exception as e2:
-            logger.error(f"Errore anche nel fallback: {e2}")
-            await message.answer("❌ Glitch arcano nell'Adventure Creator! Riprova 🎲")
 
-@dp.message(Command("adventure_quick"))
-async def adventure_quick_handler(message: types.Message):
-    """Crea avventura rapida (riassunto veloce)"""
-    
-    # Controllo autorizzazione
-    if not await check_authorization(message):
-        return
-    
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    prompt = message.text.replace("/adventure_quick", "").strip()
-    if not prompt:
-        await message.answer(
-            "🎯 **Adventure Creator Rapido**\n\n"
-            "Genera solo riassunto veloce dell'avventura.\n\n"
-            "**Uso:** `/adventure_quick <descrizione>`\n"
-            "**Esempio:** `/adventure_quick Grotta goblin livello 3`"
-        )
-        return
-    
-    try:
-        logger.info(f"Generazione avventura rapida: {prompt}")
-        
-        adventure = adventure_creator.create_adventure(prompt)
-        response = adventure_creator.format_quick_summary(adventure)
-        
-        # Salva in sessione
-        user_id = message.from_user.id
-        session_memory.add_message(user_id, f"/adventure_quick {prompt}", response)
-        
-        await message.answer(f"🎯 **Avventura Rapida**\n\n{response}", parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Errore Adventure Quick: {e}")
-        await message.answer("🎲 Errore nella generazione dell'avventura rapida. Riprova!")
+@dp.message(Command("version"))
+async def cmd_version(message: Message):
+    await bot.send_message(message.chat.id, "🎲 Codex20 v3.1 - OpenRouter Fork")
 
-@dp.message(Command("adventure_md"))
-async def adventure_markdown_handler(message: types.Message):
-    """Genera markdown Homebrewery completo"""
-    
-    await bot.send_chat_action(chat_id=message.chat.id, action="upload_document")
-    
-    prompt = message.text.replace("/adventure_md", "").strip()
-    if not prompt:
-        await message.answer(
-            "📄 Specifica il prompt per l'avventura completa!\n\n"
-            "**Esempio:** `/adventure_md Torre mago livello 5`"
-        )
-        return
-    
-    try:
-        logger.info(f"Generazione markdown: {prompt}")
-        
-        adventure = adventure_creator.create_adventure(prompt)
-        
-        # Crea Homebrewery markdown
-        markdown = adventure_creator.format_homebrewery_markdown(adventure)
-        
-        # Invia riassunto prima
-        summary = adventure_creator.format_quick_summary(adventure)
-        await message.answer(summary, parse_mode="Markdown")
-        
-        # Crea file temporaneo
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
-            f.write(markdown)
-            md_file = f.name
-        
-        # Invia file
-        await message.answer_document(
-            FSInputFile(md_file),
-            caption=f"📄 **{adventure['title']} - Homebrewery Ready**\n\n"
-                   f"Copia su homebrewery.naturalcrit.com per PDF professionale! 🎲",
-            parse_mode="Markdown"
-        )
-        
-        # Cleanup
-        os.unlink(md_file)
-        
-    except Exception as e:
-        logger.error(f"Errore generazione markdown: {e}")
-        await message.answer("❌ Errore nella generazione markdown!")
-
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    """Comando di avvio del bot con controllo autorizzazione"""
-    user_id = message.from_user.id
-    user_name = message.from_user.first_name or message.from_user.username or "Adventurer"
-    
-    if is_owner(user_id):
-        welcome_msg = f"""
-🎲 **Welcome back, Master {user_name}!**
-
-👑 **Owner Access Granted**
-You have full access to all Codex20 features:
-
-🎲 **Enhanced D&D Commands:**
-• `/help` - Complete command guide
-• `/adventure` - Generate detailed adventures  
-• `/search_rules` - Semantic D&D rules lookup
-• `/remember_campaign` - Store campaign information
-• `/recall_campaign` - Retrieve campaign memories
-
-📊 **Admin Commands:**
-• `/admin_users` - Manage registered users
-• `/admin_keys` - Manage API key pool
-• `/proxy_status` - API proxy system status
-
-🎯 Ready to assist with your D&D campaigns!
-        """
-        await message.reply(welcome_msg, parse_mode="Markdown")
-        return
-    
-    if not is_authorized(user_id):
-        await message.reply(ONBOARDING_MESSAGE, parse_mode="Markdown")
-        return
-    
-    # Utente autorizzato
-    welcome_msg = f"""
-🎲 **Welcome, {user_name}!**
-
-✅ **Access Granted**
-You're registered and ready to use Codex20!
-
-🎲 **Available Commands:**
-• `/help` - Complete command guide
-• `/adventure` - Generate adventures
-• `/search_rules` - D&D rules lookup  
-• `/remember_campaign` - Store campaign info
-• `/status` - Your usage statistics
-
-Enjoy your enhanced D&D experience!
-    """
-    await message.reply(welcome_msg, parse_mode="Markdown")
-
-@dp.message(Command("register"))
-async def register_handler(message: types.Message):
-    """Registrazione di nuovi utenti con API key"""
-    user_id = message.from_user.id
-    
-    # Owner non ha bisogno di registrarsi
-    if is_owner(user_id):
-        await message.reply("✅ You're the owner! You always have access.")
-        return
-    
-    # Estrai API key dal comando
-    args = message.text.split()
-    if len(args) < 2:
-        await message.reply(
-            "Please provide your Gemini API key:\n"
-            "`/register AIzaSyC...your-key-here`\n\n"
-            "Get your key at: https://aistudio.google.com/app/apikey",
-            parse_mode="Markdown"
-        )
-        return
-    
-    api_key = args[1]
-    
-    # Validazione formato chiave
-    if not api_key.startswith("AIza") or len(api_key) < 35:
-        await message.reply("❌ Invalid API key format. Keys should start with 'AIza' and be longer than 35 characters.")
-        return
-    
-    # Test della chiave API (validazione isolata)
-    if not validate_user_api_key(api_key):
-        await message.reply(
-            f"❌ API key validation failed. Please check your key and try again.\n\n"
-            "Make sure your key is valid and has available quota.\n"
-            "Get a valid key at: https://aistudio.google.com/app/apikey"
-        )
-        logger.warning(f"Failed registration attempt by user {user_id}: Invalid API key")
-        return
-    
-    # API key validation successful
-    add_authorized_user(
-        user_id=user_id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        api_key=api_key
-    )
-            'api_key': api_key  # In futuro serà criptato nel database
-        }
-        
-        success_msg = f"""
-✅ **Registration Successful!**
-
-🎲 Welcome to Codex20, {message.from_user.first_name}!
-
-You now have access to:
-• Advanced D&D assistance
-• Persistent conversation memory
-• Campaign management tools
-• Semantic rule lookups
-
-Try `/help` to see all available commands!
-        """
-        
-        await message.reply(success_msg, parse_mode="Markdown")
-        logger.info(f"User {user_id} successfully registered")
-        
-    except Exception as e:
-        await message.reply(
-            f"❌ API key validation failed: {str(e)}\n\n"
-            "Please check your key and try again.\n"
-            "Get a valid key at: https://aistudio.google.com/app/apikey"
-        )
-        logger.warning(f"Failed registration attempt by user {user_id}: {str(e)}")
-
-@dp.message(Command("admin_users"))
-async def admin_users_handler(message: types.Message):
-    """[ADMIN] Lista utenti autorizzati"""
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ Admin access required.")
-        return
-    
-    users = get_authorized_users()
-    user_list = "\n".join([f"• {user[0]} ({user[1] or 'N/A'}) - {user[3]}" for user in users])
-    await message.reply(
-        f"📋 **Authorized Users:**\n{user_list}\n\n"
-        f"👑 **Owner:** {OWNER_ID} (permanent access)"
-    )
-
-@dp.message(Command("admin_add_user"))
-async def admin_add_user_handler(message: types.Message):
-    """[ADMIN] Aggiungi utente alla allowlist"""
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ Admin access required.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.reply("Usage: `/admin_add_user <user_id>`")
-        return
-    
-    try:
-        user_id = int(args[1])
-        add_authorized_user(user_id, "Manual_Admin_Add", "Admin_Added")
-        await message.reply(f"✅ User {user_id} added to allowlist.")
-        logger.info(f"Admin {message.from_user.id} added user {user_id} to allowlist")
-    except ValueError:
-        await message.reply("❌ Invalid user ID format.")
-
-@dp.message(Command("proxy_status"))
-async def proxy_status_handler(message: types.Message):
-    """Status del sistema API proxy"""
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ Admin access required.")
-        return
-    
-    # Conta chiavi API disponibili
-    total_keys = len([k for k in API_KEYS if k.strip()])
-    
-    status_msg = f"""
-🔄 **API Proxy System Status**
-
-🔑 **Available Keys:** {total_keys}
-🔄 **Current Key Index:** {current_key_index + 1}/{total_keys}
-📊 **Rotation:** Health-based with automatic failover
-
-🎯 **System Health:** ✅ Operational
-📊 **Load Balancing:** Active
-🚪 **Emergency Protocols:** Ready
-    """
-    
-    await message.reply(status_msg, parse_mode="Markdown")
 
 @dp.message(Command("search_rules"))
-async def search_rules_handler(message: types.Message):
-    """[ENHANCED] Ricerca semantica nelle regole D&D 5e via MemPalace"""
-    if not await check_authorization(message):
+async def cmd_search_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
         return
-    
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "🔍 **Semantic D&D Rules Search**\n\n"
-            "Usage: `/search_rules <your query>`\n\n"
-            "Examples:\n"
-            "• `/search_rules fireball spell mechanics`\n"
-            "• `/search_rules grappling rules`\n"
-            "• `/search_rules spellcasting focus`",
-            parse_mode="Markdown"
-        )
+    prompt = message.text.replace("/search_rules ", "")
+    if not prompt or not prompt.strip():
+        await bot.send_message(message.chat.id, "Usa: /search_rules <query>")
         return
-    
-    query = args[1]
-    await message.reply(f"🔍 Searching D&D rules for: *{query}*...", parse_mode="Markdown")
-    
-    # TODO: Integrate with MemPalace system
-    # For now, use enhanced search with 5etools data
-    search_results = search_5etools(query)
-    
-    if search_results:
-        # Enhanced response with context
-        enhanced_prompt = f"""
-        Analizza questa query D&D: "{query}"
-        
-        Usa questi dati dai tomi ufficiali:
-        {search_results}
-        
-        Fornisci una spiegazione chiara e completa delle regole, con esempi pratici.
-        """
-        
-        response = await generate_content_safe(enhanced_prompt)
-        await message.reply(f"🎲 **D&D Rules: {query}**\n\n{response}", parse_mode="Markdown")
-    else:
-        # Fallback to general AI knowledge
-        fallback_prompt = f"Spiega le regole di D&D 5e relative a: {query}"
-        response = await generate_content_safe(fallback_prompt)
-        await message.reply(f"🎲 **D&D Rules: {query}**\n\n{response}\n\n⚠️ *Based on general knowledge*", parse_mode="Markdown")
+    prompt = prompt.strip()[:500]
+    await cmd_search(message, user_id, bot, prompt)
+
+
+@dp.message(Command("adventure"))
+async def cmd_adventure_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
+        return
+    prompt = message.text.replace("/adventure ", "")
+    if not prompt or not prompt.strip():
+        await bot.send_message(message.chat.id, "Usa: /adventure <prompt>")
+        return
+    prompt = prompt.strip()[:2000]
+    await cmd_adventure(message, user_id, bot, prompt, None)
+
+
+@dp.message(Command("adventure_quick"))
+async def cmd_adventure_quick_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
+        return
+    prompt = message.text.replace("/adventure_quick ", "")
+    if not prompt or not prompt.strip():
+        await bot.send_message(message.chat.id, "Usa: /adventure_quick <prompt>")
+        return
+    prompt = prompt.strip()[:2000]
+    await cmd_adventure(message, user_id, bot, prompt, "quick")
+
+
+@dp.message(Command("adventure_md"))
+async def cmd_adventure_md_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
+        return
+    prompt = message.text.replace("/adventure_md ", "")
+    if not prompt or not prompt.strip():
+        await bot.send_message(message.chat.id, "Usa: /adventure_md <prompt>")
+        return
+    prompt = prompt.strip()[:2000]
+    await cmd_adventure(message, user_id, bot, prompt, "md")
+
 
 @dp.message(Command("remember_campaign"))
-async def remember_campaign_handler(message: types.Message):
-    """[ENHANCED] Memorizza informazioni della campagna"""
-    if not await check_authorization(message):
-        return
-    
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "📜 **Campaign Memory System**\n\n"
-            "Usage: `/remember_campaign <campaign details>`\n\n"
-            "Examples:\n"
-            "• `/remember_campaign The party met Elara the elf ranger in Neverwinter`\n"
-            "• `/remember_campaign Boss fight: Ancient Red Dragon defeated in session 5`\n"
-            "• `/remember_campaign NPC: Thorin the dwarf blacksmith, owes party 500gp`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    campaign_info = args[1]
+async def cmd_remember_handler(message: Message):
     user_id = message.from_user.id
-    
-    # TODO: Integrate with MemPalace for persistent storage
-    # For now, use session memory as temporary storage
-    session_memory.add_message(user_id, f"[CAMPAIGN MEMORY]: {campaign_info}", "Campaign information stored successfully.")
-    
-    await message.reply(
-        f"✅ **Campaign Memory Stored**\n\n"
-        f"📜 Remembered: *{campaign_info[:100]}{'...' if len(campaign_info) > 100 else ''}*\n\n"
-        f"Use `/recall_campaign <query>` to retrieve this information later.",
-        parse_mode="Markdown"
-    )
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
+        return
+    info = message.text.replace("/remember_campaign ", "")
+    if not info:
+        await bot.send_message(message.chat.id, "Usa: /remember_campaign <info>")
+        return
+    await cmd_remember(message, user_id, bot, info)
+
 
 @dp.message(Command("recall_campaign"))
-async def recall_campaign_handler(message: types.Message):
-    """[ENHANCED] Richiama informazioni della campagna"""
-    if not await check_authorization(message):
-        return
-    
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "🔍 **Campaign Memory Recall**\n\n"
-            "Usage: `/recall_campaign <search query>`\n\n"
-            "Examples:\n"
-            "• `/recall_campaign Elara`\n"
-            "• `/recall_campaign dragon fight`\n"
-            "• `/recall_campaign Thorin blacksmith`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    query = args[1]
+async def cmd_recall_handler(message: Message):
     user_id = message.from_user.id
-    
-    # Get session context for campaign memories
-    context = session_memory.get_context(user_id)
-    
-    if "[CAMPAIGN MEMORY]" in context:
-        # Enhanced recall with AI analysis
-        recall_prompt = f"""
-        L'utente cerca informazioni sulla campagna: "{query}"
-        
-        Ecco le informazioni memorizzate:
-        {context}
-        
-        Estrai e presenta le informazioni più rilevanti per la query dell'utente.
-        Se non trovi informazioni pertinenti, rispondi che non ci sono dati memorizzati per quella query.
-        """
-        
-        response = await generate_content_safe(recall_prompt)
-        await message.reply(f"📜 **Campaign Recall: {query}**\n\n{response}", parse_mode="Markdown")
-    else:
-        await message.reply(
-            f"📜 **No Campaign Data Found**\n\n"
-            f"No campaign information found for: *{query}*\n\n"
-            f"Use `/remember_campaign <details>` to store campaign information first.",
-            parse_mode="Markdown"
-        )
-
-@dp.message(Command("help"))
-async def help_handler(message: types.Message):
-    """Comando help aggiornato con Adventure Creator e Session Memory"""
-    
-    # Controllo autorizzazione
-    if not await check_authorization(message):
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ API key richiesta.")
         return
-    
-    help_text = """🎲 **CODEX20 - IL CUSTODE DEI TOMI**
-*Versione 2.2 con Advanced Adventure Creator*
+    query = message.text.replace("/recall_campaign ", "")
+    if not query:
+        await bot.send_message(message.chat.id, "Usa: /recall_campaign <query>")
+        return
+    await cmd_recall(message, user_id, bot, query)
 
-📖 **CONSULTAZIONE D&D 5E:**
-Chiedi qualsiasi cosa su regole, mostri, incantesimi, equipaggiamento!
-*"Cos'è un Beholder?"* - *"Come funziona Fireball?"*
-
-👤 **GENERAZIONE PERSONAGGI:**
-*"Crea un mago elfo livello 3"* → Scheda PDF completa
-
-🗺️ **ADVENTURE CREATOR AVANZATO:**
-• `/adventure <prompt>` - **Avventura completa dettagliata** (multi-parte)
-• `/adventure_quick <prompt>` - Avventura rapida (solo riassunto)  
-• `/adventure_md <prompt>` - Con markdown Homebrewery
-
-🧠 **GESTIONE MEMORIA:**
-• `/memory` - Info sulla memoria della conversazione
-• `/forget` - Cancella la memoria e ricomincia da capo
-
-**Esempi Adventure Complete:**
-• `/adventure Grotta goblin per 4 PCs livello 3`
-• `/adventure Torre mago abbandonata livello 5`  
-• `/adventure Castello infestato dai fantasmi`
-• `/adventure Nave pirata per party esperto`
-
-**Differenze:**
-• **`/adventure`** = Avventura completa con background, encounters dettagliati, NPCs, locations, hooks (6 parti)
-• **`/adventure_quick`** = Solo riassunto veloce con statistiche base
-
-🔧 **UTILITÀ:**
-• `/mappa` - Debug mapping campi PDF
-• `/help` - Questo messaggio
-
-*Powered by Gemini 2.0 Flash + 34MB 5etools database*
-*Adventure Creator ora genera avventure complete utilizzabili al tavolo!* 🎲"""
-    
-    await message.answer(help_text, parse_mode="Markdown")
 
 @dp.message(Command("memory"))
-async def memory_command(message: types.Message):
-    """Mostra info sessione corrente"""
-    user_id = message.from_user.id
-    
-    session_count = len(session_memory.sessions.get(user_id, []))
-    last_activity = session_memory.last_activity.get(user_id)
-    
-    if last_activity:
-        last_activity_str = last_activity.strftime('%H:%M del %d/%m')
-    else:
-        last_activity_str = "Mai"
-    
-    await message.answer(
-        f"🧠 **Memoria Sessione**\n\n"
-        f"• Messaggi salvati: {session_count}/10\n"
-        f"• Ultima attività: {last_activity_str}\n"
-        f"• Sessione attiva: {'Sì' if session_count > 0 else 'No'}\n\n"
-        f"_La memoria mantiene gli ultimi 10 messaggi per conversazioni più fluide._",
-        parse_mode="Markdown"
-    )
+async def cmd_memory_handler(message: Message):
+    await cmd_memory(message, message.from_user.id, bot)
+
 
 @dp.message(Command("forget"))
-async def forget_command(message: types.Message):
-    """Cancella memoria sessione"""
+async def cmd_forget_handler(message: Message):
+    await cmd_forget(message, message.from_user.id, bot)
+
+
+@dp.message(Command("admin_users"))
+async def cmd_admin_users_handler(message: Message):
     user_id = message.from_user.id
-    session_memory.clear_session(user_id)
-    
-    await message.answer(
-        "🧠 **Memoria cancellata!**\n\n"
-        "La conversazione ripartirà da zero dal prossimo messaggio. 🎲"
-    )
-
-@dp.message(F.text)
-async def chat_handler(message: types.Message):
-    """
-    Handler principale: ascolta i messaggi, interroga i tomi e comunica con Gemini.
-    Esegue il parsing della risposta: se rileva un blocco JSON, lo invia al modulo PDF
-    e restituisce la scheda personaggio generata in chat.
-    """
-    
-    # Controllo autorizzazione per tutti i messaggi
-    if not await check_authorization(message):
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ Solo admin.")
         return
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    # Controllo per adventure intent senza comando esplicito
-    adventure_keywords = [
-        'avventura', 'adventure', 'dungeon', 'quest', 'missione',
-        'grotta', 'torre', 'castello', 'bosco', 'foresta', 'nave',
-        'goblin', 'orchi', 'fantasmi', 'non morti', 'drago', 'banditi'
-    ]
-    
-    # Check se il messaggio contiene "help" o parole chiave help
-    if any(word in message.text.lower() for word in ['help', 'aiuto', 'comandi', 'cosa puoi fare']):
-        await help_handler(message)
+    await cmd_admin_users(message, user_id, bot)
+
+
+@dp.message(Command("admin_add_user"))
+async def cmd_admin_add_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ Solo admin.")
         return
-    
-    # Check per adventure intent
-    if any(keyword in message.text.lower() for keyword in adventure_keywords):
-        # Se contiene anche indicatori di livello/party, probabile adventure request
-        if any(indicator in message.text.lower() for indicator in ['livello', 'level', 'lv', 'pcs', 'giocatori', 'party']):
-            try:
-                # Genera avventura direttamente
-                adventure = adventure_creator.create_adventure(message.text)
-                response = adventure_creator.format_quick_summary(adventure)
-                await message.answer(
-                    f"🎯 **Rilevata richiesta avventura!**\n\n{response}",
-                    parse_mode="Markdown"
-                )
-                return
-            except Exception as e:
-                logger.error(f"Errore adventure intent: {e}")
-                # Continua con normale processing
-    
-    # 1. Ricerca Dinamica nei manuali (5etools)
-    tomi_context = search_5etools(message.text)
-    
-    # 2. Composizione del Prompt (Personalità + Regole + Richiesta Utente)
-    prompt = f"{system_context_base}{tomi_context}\n\nUtente: {message.text}"
-    
-    try:
-        response_text = await generate_content_safe(prompt)
-        if not response_text: return
+    new_id = message.text.replace("/admin_add_user ", "")
+    if not new_id:
+        await bot.send_message(message.chat.id, "Usa: /admin_add_user <id>")
+        return
+    await cmd_admin_add(message, user_id, bot, new_id)
 
-        # Cerchiamo se l'AI ha generato il payload JSON per la scheda personaggio
-        # Supporta ```json {JSON} ```, ``` {JSON} ``` e {JSON} (senza backticks)
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```|(\{.*?\})", response_text, re.DOTALL)
-        
-        if json_match:
-            try:
-                # Seleziona il gruppo corretto in base a quale parte della regex ha matchato
-                json_str = json_match.group(1) if json_match.group(1) else json_match.group(2)
-                char_data = json.loads(json_str)
-                
-                # Crea fisicamente il PDF sul disco temporaneo
-                pdf_path = create_pdf(char_data, message.from_user.id)
-                
-                # Rimuove il blocco JSON dalla stringa in modo che l'utente non veda il codice RAW
-                clean_text = re.sub(r"```(?:json)?.*?```", "", response_text, flags=re.DOTALL).strip()
-                # Se non c'erano backticks, prova a rimuovere il JSON nudo (se è alla fine o all'inizio)
-                if clean_text == response_text.strip():
-                     clean_text = response_text.replace(json_str, "").strip()
 
-                if clean_text: 
-                    try:
-                        await message.answer(clean_text, parse_mode="Markdown")
-                    except Exception:
-                        await message.answer(clean_text)
-                
-                if pdf_path:
-                    # Invia il Documento generato
-                    try:
-                        await message.answer_document(
-                            FSInputFile(pdf_path), 
-                            caption=f"Ecco la scheda di *{char_data.get('nome')}*! 🎲",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        await message.answer_document(
-                            FSInputFile(pdf_path), 
-                            caption=f"Ecco la scheda di {char_data.get('nome')}! 🎲"
-                        )
-                    
-                    # Cleanup del file temporaneo
-                    if os.path.exists(pdf_path): 
-                        os.remove(pdf_path)
-                else:
-                    await message.answer("Dati generati correttamente, ma c'è stato un problema nella creazione fisica del PDF. 🎲")
-                return
-            
-            except Exception as e:
-                logger.error(f"Errore parsing JSON o generazione PDF: {e}")
-                # Se il parsing fallisce, proseguiamo trattando come risposta testuale
+@dp.message(Command("proxy_status"))
+async def cmd_proxy_status_handler(message: Message):
+    user_id = message.from_user.id
+    if user_id not in authorized_user_ids:
+        await bot.send_message(message.chat.id, "⚠️ Solo admin.")
+        return
+    await cmd_proxy_status(message, user_id, bot)
 
-        # Se non c'era JSON o se c'è stato un errore nel parsing, tratta come risposta standard
-        response_text = response_text.strip()
-        if len(response_text) > 4000:
-            await message.answer(f"{response_text[:4000]}...")
-        else:
-            try:
-                await message.answer(f"{response_text}\n\n🎲", parse_mode="Markdown")
-            except Exception:
-                await message.answer(f"{response_text}\n\n🎲")
-            
-    except Exception as e:
-        logger.error(f"Errore generale: {e}")
-        await message.answer("Spiacente, Codex20 ha subito un glitch arcano. Riprova! 🎲")
 
-# ==========================================
-# BOOTSTRAP
-# ==========================================
-async def setup_bot_commands():
-    """Registra i comandi del bot con Telegram all'avvio"""
-    
-    commands = [
-        types.BotCommand(command="help", description="📖 Guida completa e lista comandi"),
-        types.BotCommand(command="adventure", description="🎲 Avventura completa dettagliata (multi-parte)"),
-        types.BotCommand(command="adventure_quick", description="🎯 Avventura rapida (solo riassunto)"),
-        types.BotCommand(command="adventure_md", description="📜 Avventura con markdown Homebrewery"),
-        types.BotCommand(command="memory", description="🧠 Info sulla memoria conversazione"),
-        types.BotCommand(command="forget", description="🗑️ Cancella memoria e ricomincia"),
-        types.BotCommand(command="mappa", description="🔧 Debug mapping campi PDF"),
-    ]
-    
-    try:
-        await bot.set_my_commands(commands, scope=types.BotCommandScopeDefault())
-        logger.info("✅ Bot commands registered successfully!")
-    except Exception as e:
-        logger.error(f"❌ Error registering commands: {e}")
+# --- Cleanup on shutdown ---
 
-async def main():
-    logger.info("Avvio di Codex20 - Il Custode dei Tomi")
-    
-    # Register bot commands on startup
-    await setup_bot_commands()
-    
-    await dp.start_polling(bot)
+async def on_shutdown(signal, process):
+    await session_manager.cleanup_expired()
+    logger.info("Codex20 shutting down gracefully.")
+
+
+# --- Main ---
 
 if __name__ == "__main__":
-    # Initialize user database
-    init_user_database()
-    logger.info("✅ User database initialized")
-    
-    asyncio.run(main())
+    logger.info("Inizializzazione Codex20 OpenRouter Fork...")
+    logger.info(f"Modello: {DEFAULT_MODEL}")
+    # Sanitizzazione API key: mai esporre in log
+    key_display = (
+        openrouter_client.api_key[:5] + "..." + openrouter_client.api_key[-3:]
+        if openrouter_client.api_key and len(openrouter_client.api_key) > 8
+        else "***"
+    )
+    logger.info(f"API Key: {key_display}")
+
+    # Test connessione
+    try:
+        test_result = openrouter_client.test_connection()
+        if test_result:
+            logger.info("✅ Connessione OpenRouter OK")
+        else:
+            logger.warning("⚠️ Test connessione fallito, continuerà comunque")
+    except Exception as e:
+        logger.error(f"❌ Test connessione fallito: {e}")
+
+    # Start polling
+    logger.info("Bot avviato. Attesse messaggi...")
+    bot.infinity_polling()
+    logger.info("Bot arrestato.")

@@ -1,33 +1,28 @@
-# Codex20 Bot v2.2 - Enhanced D&D Assistant
-# Container-based deployment with owner privileges and API proxy
+# Codex20 OpenRouter - Docker Image
+# Multi-stage build for optimal size
 
-FROM python:3.12-slim
+FROM python:3.11-slim as base
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    sqlite3 \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python packages
+# Copy requirements first for better caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application code
 COPY . .
 
-# Create data directory with proper permissions
-RUN mkdir -p /app/data && \
-    chmod 755 /app/data
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs /app/uploads
 
-# Expose port (optional, for health checks)
-EXPOSE 8000
+# Expose port
+EXPOSE 8084
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sqlite3; sqlite3.connect('/app/data/sessions.db').execute('SELECT 1')" || exit 1
-
-# Run the bot
-CMD ["python", "bot.py"]
+# Default command (will be overridden by docker-compose)
+CMD ["python", "app.py"]
