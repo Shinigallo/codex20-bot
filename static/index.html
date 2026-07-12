@@ -74,12 +74,82 @@
             background: #5aa2e5;
         }
         
+        /* Modal Overlay */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-box {
+            background: #242f3d;
+            border: 1px solid #364454;
+            border-radius: 12px;
+            padding: 30px;
+            width: 400px;
+            max-width: 90%;
+            position: relative;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: none;
+            border: none;
+            color: #8b9bad;
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .modal-close:hover {
+            color: #ffffff;
+        }
+
+        .modal-box h2 {
+            font-size: 18px;
+            color: #6ab2f5;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .form-footer {
+            text-align: center;
+            margin-top: 24px;
+            border-top: 1px solid #364454;
+            padding-top: 20px;
+        }
+
         .login-error {
             color: #ff5959;
             font-size: 13px;
             margin-top: 12px;
             text-align: center;
             display: none;
+        }
+
+        .link-register {
+            color: #6ab2f5;
+            text-decoration: none;
+            font-size: 14px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .link-register:hover {
+            color: #4a9fe5;
+            text-decoration: underline;
         }
         
         /* Main App */
@@ -462,11 +532,33 @@
     <div id="loginContainer" class="login-container">
         <div class="login-box">
             <h1>🎲 Codex20 Web</h1>
+            
+            <!-- Login Form -->
             <form id="loginForm">
-                <input type="text" id="username" placeholder="Username" required>
-                <input type="password" id="password" placeholder="Password" required>
+                <input type="text" id="loginUsername" placeholder="Username" required>
+                <input type="password" id="loginPassword" placeholder="Password" required>
                 <button type="submit">Accedi</button>
                 <div id="loginError" class="login-error"></div>
+            </form>
+            
+            <div class="form-footer">
+                <a href="#" id="openRegister" class="link-register">Non hai un account? Registrati</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Register Modal -->
+    <div id="registerModal" class="modal-overlay">
+        <div class="modal-box">
+            <button id="closeRegister" class="modal-close">&times;</button>
+            <h2>📝 Registrazione</h2>
+            <form id="registerForm">
+                <input type="text" id="registerUsername" placeholder="Username" required>
+                <input type="password" id="registerPassword" placeholder="Password" required>
+                <input type="password" id="registerPasswordConfirm" placeholder="Conferma Password" required>
+                <button type="submit">Registrati</button>
+                <div id="registerError" class="login-error"></div>
+                <div id="registerSuccess" style="color: #4cd964; text-align: center; margin-top: 12px; display: none;"></div>
             </form>
         </div>
     </div>
@@ -527,9 +619,18 @@
         const loginContainer = document.getElementById('loginContainer');
         const app = document.getElementById('app');
         const loginForm = document.getElementById('loginForm');
+        const registerForm = document.getElementById('registerForm');
         const loginError = document.getElementById('loginError');
-        const usernameInput = document.getElementById('username');
-        const passwordInput = document.getElementById('password');
+        const registerError = document.getElementById('registerError');
+        const registerSuccess = document.getElementById('registerSuccess');
+        const registerModal = document.getElementById('registerModal');
+        const openRegister = document.getElementById('openRegister');
+        const closeRegister = document.getElementById('closeRegister');
+        const usernameInput = document.getElementById('loginUsername');
+        const passwordInput = document.getElementById('loginPassword');
+        const registerUsernameInput = document.getElementById('registerUsername');
+        const registerPasswordInput = document.getElementById('registerPassword');
+        const registerPasswordConfirmInput = document.getElementById('registerPasswordConfirm');
         const currentUserSpan = document.getElementById('currentUser');
         const logoutBtn = document.getElementById('logoutBtn');
         const newChatBtn = document.getElementById('newChatBtn');
@@ -544,12 +645,60 @@
         const fileInput = document.getElementById('fileInput');
         const fileList = document.getElementById('fileList');
         
-        // Auth
-        if (authToken && currentUser) {
-            showApp();
-        } else {
-            showLogin();
-        }
+        // Toggle modale registrazione
+        openRegister.addEventListener('click', (e) => {
+            e.preventDefault();
+            registerModal.classList.add('active');
+        });
+        
+        closeRegister.addEventListener('click', () => {
+            registerModal.classList.remove('active');
+        });
+        
+        registerModal.addEventListener('click', (e) => {
+            if (e.target === registerModal) {
+                registerModal.classList.remove('active');
+            }
+        });
+        
+        // Submit form registrazione
+        registerForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            registerError.style.display = 'none';
+            registerSuccess.style.display = 'none';
+            
+            if (registerPasswordInput.value !== registerPasswordConfirmInput.value) {
+                registerError.textContent = 'Le password non corrispondono';
+                registerError.style.display = 'block';
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('username', registerUsernameInput.value);
+            formData.append('password', registerPasswordInput.value);
+            
+            try {
+                const response = await fetch('/api/register', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    registerSuccess.textContent = `Registrazione riuscita! Ruolo: ${data.role}`;
+                    registerSuccess.style.display = 'block';
+                    registerForm.reset();
+                    registerModal.classList.remove('active');
+                } else {
+                    const error = await response.json();
+                    registerError.textContent = error.detail || 'Registrazione fallita';
+                    registerError.style.display = 'block';
+                }
+            } catch (e) {
+                registerError.textContent = 'Errore di connessione';
+                registerError.style.display = 'block';
+            }
+        });
         
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
