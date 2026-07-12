@@ -1,70 +1,99 @@
 """
-User management for Codex20
-Manages user registration and authentication
+Gestione utenti con bcrypt e ruolo admin automatico per primo utente.
 """
+
 import os
 import json
+import bcrypt
+from datetime import datetime
 from pathlib import Path
-import hashlib
+from typing import Optional, Dict, Any
 
-# User data file
-DATA_DIR = Path(__file__).parent.parent / "data"
-USERS_FILE = DATA_DIR / "users.json"
+USERS_FILE = Path("data/users.json")
 
-def load_users():
-    """Load users from JSON file"""
-    if USERS_FILE.exists():
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
 
-def save_users(users):
-    """Save users to JSON file"""
-    DATA_DIR.mkdir(exist_ok=True)
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=2)
+class UserManager:
+    """Gestisce registrazione e autenticazione utenti con bcrypt."""
 
-def hash_password(password):
-    """Hash password with SHA256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    def __init__(self, users_file: str = "data/users.json"):
+        self.users_file = Path(users_file)
+        self.users_file.parent.mkdir(exist_ok=True)
+        self._load_users()
 
-def register_user(username, password):
-    """Register a new user"""
-    users = load_users()
-    
-    # Check if user exists
-    if username in users:
-        return False, "Utente già esistente"
-    
-    # Create user
-    users[username] = {
-        "password_hash": hash_password(password),
-        "user_id": len(users) + 1,
-        "created_at": "2026-07-11T00:00:00"
-    }
-    
-    save_users(users)
-    return True, f"Utente '{username}' creato con ID {users[username]['user_id']}"
+    def _load_users(self):
+        """Carica utenti da file JSON."""
+        if self.users_file.exists():
+            with open(self.users_file, 'r') as f:
+                self.users = json.load(f)
+        else:
+            self.users = {}
 
-def verify_user(username, password):
-    """Verify user credentials"""
-    users = load_users()
-    
-    if username not in users:
-        return False, None
-    
-    expected_hash = users[username]["password_hash"]
-    actual_hash = hash_password(password)
-    
-    if expected_hash == actual_hash:
-        return True, users[username]
-    
-    return False, None
+    def _save_users(self):
+        """Salva utenti su file JSON."""
+        with open(self.users_file, 'w') as f:
+            json.dump(self.users, f, indent=2)
 
-# Admin user (hardcoded)
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Hash password con bcrypt."""
+        salt = bcrypt.gensalt()
+        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
 
-def is_admin(username):
-    """Check if user is admin"""
-    return username == ADMIN_USERNAME
+    def register(self, username: str, password: str) -> tuple[bool, str, int]:
+        """
+        Registra nuovo utente.
+        
+        Returns:
+            tuple: (successo, messaggio, user_id)
+        """
+        # Verifica duplicati
+        if username in self.users:
+            return False, f"Username '{username}' già registrato.", -1
+
+        # Determina ruolo: primo utente = admin, altri = user
+        role = "admin" if len(self.users) == 0 else "user"
+
+        # Crea utente con bcrypt
+        user_id = len(self.users) + 1
+        self.users[username] = {
+            "username": username,
+            "password_hash": self.hash_password(password),
+            "user_id": user_id,
+            "role": role,
+            "created_at": datetime.now().isoformat()
+        }
+        self._save_users()
+
+        msg = f"Utente registrato con successo! Ruolo: {role}"
+        return True, msg, user_id
+
+    def authenticate(self, username: str, password: str) -> tuple[bool, dict]:
+        """
+        Autentica utente con bcrypt.
+        
+        Returns:
+            tuple: (successo, user_data)
+        """
+        if username not in self.users:
+            return False, {}
+
+        user = self.users[username]
+        if bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            return True, user
+        return False, {}
+
+    def get_user(self, username: str) -> Optional[dict]:
+        """Ottieni utente per username."""
+        return self.users.get(username)
+
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        """Ottieni utente per ID."""
+        for user in self.users.values():
+            if user['user_id'] == user_id:
+                return user
+        return None
+
+    def is_admin(self, username: str) -> bool:
+        """Verifica se utente è admin."""
+        user = self.get_user(username)
+        return user is not None and user.get('role') == 'admin'
