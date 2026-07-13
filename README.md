@@ -52,7 +52,7 @@ Accedi all'interfaccia web:
 2. Ottieni il token
 3. Aggiungi al .env:
 ```bash
-TELEGRAM_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+TELEGRAM_TOKEN=your_token_here
 ```
 
 ### Avvio Bot
